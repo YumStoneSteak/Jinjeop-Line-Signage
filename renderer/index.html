@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Split Display Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="topHoverZone"></div>
+
+    <aside id="fullscreenSidebar" class="fullscreen-sidebar" aria-label="Fullscreen dashboard sidebar">
+      <div class="sidebar-logo-slot">
+        <img id="sidebarLogoImage" src="../files/ncuc_logo.png" alt="Company Logo" onerror="this.style.display='none'" />
+      </div>
+
+      <div class="sidebar-widget sidebar-time-card">
+        <div id="sidebarStationName" class="sidebar-station-name">별내별가람역</div>
+        <div id="sidebarDate" class="sidebar-date">-</div>
+        <div id="sidebarClock" class="sidebar-clock">--:--</div>
+      </div>
+
+      <div id="solarTermWidget" class="sidebar-widget solar-term-card hidden" aria-label="24절기">
+        <div id="solarTermTitle" class="solar-term-title">오늘의 절기</div>
+        <div id="solarTermPrimary" class="solar-term-primary">절기 정보 확인 중</div>
+        <div id="solarTermDate" class="solar-term-date"></div>
+        <div id="solarTermDescription" class="solar-term-description"></div>
+      </div>
+
+      <div id="dailyAdviceWidget" class="sidebar-widget daily-advice-card hidden" aria-label="오늘의 한마디">
+        <div class="daily-advice-title">오늘의 한마디</div>
+        <div id="dailyAdviceMessage" class="daily-advice-message">오늘도 좋은 하루 보내세요.</div>
+        <div id="dailyAdviceAuthor" class="daily-advice-author hidden"></div>
+      </div>
+
+      <div id="nextTrainWidget" class="sidebar-widget next-train-card hidden" aria-label="다음 열차">
+        <div class="next-train-title">열차 시간표</div>
+        <div id="nextTrainPrimary" class="next-train-primary">--:--</div>
+        <div id="nextTrainSecondary" class="next-train-secondary"></div>
+        <div id="nextTrainTable" class="next-train-table hidden" aria-label="다음 3개 열차 도착시간"></div>
+        <div class="next-train-note">
+          <span>실시간 정보가 아니며</span>
+          <span>열차운행 상황에 의해 변동될 수 있습니다.</span>
+        </div>
+      </div>
+
+      <div class="sidebar-widget weather-location-card">
+        <span class="weather-mini-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+        </span>
+        <span>남양주의 하늘은</span>
+      </div>
+
+      <div class="sidebar-widget weather-main-card">
+        <div id="weatherIcon" class="weather-icon" aria-hidden="true"></div>
+        <div class="weather-temp-stack">
+          <div id="weatherTemp" class="weather-temp">--°</div>
+          <div id="weatherFeelsLike" class="weather-feels-inline">체감 --°</div>
+        </div>
+      </div>
+
+      <div class="weather-duo">
+        <div class="sidebar-widget weather-mini-card">
+          <span class="weather-mini-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/><path d="M10 9h4"/><path d="M10 12h4"/></svg>
+          </span>
+          <span id="weatherLow">최저 --°</span>
+        </div>
+        <div class="sidebar-widget weather-mini-card">
+          <span class="weather-mini-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/><path d="M10 9h4"/></svg>
+          </span>
+          <span id="weatherHigh">최고 --°</span>
+        </div>
+      </div>
+
+      <div class="sidebar-widget weather-mini-card">
+        <span class="weather-mini-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 2.5S5 10 5 15a7 7 0 0 0 14 0c0-5-7-12.5-7-12.5Z"/></svg>
+        </span>
+        <span id="weatherPrecip">강수확률 --%</span>
+      </div>
+
+      <div class="sidebar-widget weather-mini-card">
+        <span class="weather-mini-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 22V8"/><path d="m5 12 7-7 7 7"/><path d="M5 19h14"/></svg>
+        </span>
+        <span id="weatherAirQuality">대기질 확인 중</span>
+      </div>
+
+      <div class="sidebar-widget weather-mini-card">
+        <span class="weather-mini-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 10V2"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h20"/><path d="M5 18a7 7 0 0 1 14 0"/></svg>
+        </span>
+        <span id="weatherSunTime">일몰 --:--</span>
+      </div>
+
+      <div id="sidebarResizer" class="sidebar-resizer" title="사이드바 너비 조절"></div>
+    </aside>
+
+    <div id="weatherUpdateStatus" class="weather-update-status">날씨 업데이트 대기 중</div>
+
+    <header id="toolbar">
+      <div class="toolbar-title">남양주도시공사 진접선 열차 행선안내 현시 (v1.0.1 build 44)</div>
+      <div class="toolbar-actions">
+        <button id="btnFullscreen">전체화면 시작</button>
+        <button id="btnSidebarSettings">좌측 바</button>
+        <button id="btnScreenSettings">화면 설정</button>
+        <button id="btnFileManager">파일 관리</button>
+        <button id="btnExit" class="danger">종료</button>
+      </div>
+    </header>
+
+    <main id="splitRoot">
+      <section id="panelBrowser" class="panel">
+        <div id="browserTitleWidget" class="panel-title-widget browser-title-widget" role="button" tabindex="0" title="4호선 보기">
+          <span>진접선 열차 위치 정보</span>
+        </div>
+        <div id="zoomStatus" class="zoom-status">125%</div>
+        <webview id="browserView" src="about:blank"></webview>
+      </section>
+
+      <div id="divider"></div>
+
+      <section id="panelMedia" class="panel">
+        <div class="panel-title-widget">공지 게시판</div>
+        <div id="mediaStage">
+          <div id="emptyState">재생 가능한 미디어가 없습니다.</div>
+          <img id="slideImage" alt="slideshow image" />
+          <video id="slideVideo" muted playsinline preload="auto"></video>
+          <div id="slideCaption"></div>
+        </div>
+      </section>
+    </main>
+
+    <aside id="filePanel" class="side-panel hidden">
+      <h2>파일 관리</h2>
+      <section class="settings-section">
+        <h3>파일 작업</h3>
+        <div class="panel-buttons">
+          <button id="btnAddFiles">파일 추가</button>
+          <button id="btnCheckMissing">누락 파일 확인</button>
+          <button id="btnCloseFilePanel">닫기</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>재생 목록</h3>
+        <table id="playlistTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>파일명</th>
+              <th>유형</th>
+              <th>재생시간(초)</th>
+              <th>상태</th>
+              <th>삭제</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="hint">행의 좌측 핸들(≡)을 드래그하여 순서를 변경할 수 있습니다.</p>
+      </section>
+    </aside>
+
+    <aside id="sidebarPanel" class="side-panel hidden">
+      <h2>좌측 바</h2>
+
+      <section class="settings-section">
+        <h3>날씨 위젯</h3>
+        <p id="weatherSettingsStatus" class="settings-note">Open-Meteo 기준으로 자동 갱신됩니다.</p>
+      </section>
+
+      <section class="settings-section">
+        <h3>다음 열차 설정</h3>
+        <div class="form-grid">
+          <label>현재 역
+            <select id="selectTrainStation">
+              <option value="408">별내별가람역</option>
+              <option value="406">오남역</option>
+              <option value="405">진접역</option>
+            </select>
+          </label>
+
+          <label>표시 방향
+            <select id="selectTrainDirection">
+              <option value="하행">하행</option>
+              <option value="상행">상행</option>
+            </select>
+          </label>
+
+          <label>표시 형식
+            <select id="selectTimetableDisplayFormat">
+              <option value="table">표형식</option>
+              <option value="time">시간형식</option>
+            </select>
+          </label>
+
+          <label>좌측 바 너비(px)
+            <input id="inputSidebarWidth" type="number" min="220" max="420" step="5" />
+          </label>
+        </div>
+
+        <div class="panel-buttons">
+          <button id="btnRefreshTimetable" type="button">시간표 갱신</button>
+        </div>
+
+        <p id="timetableLastUpdated" class="settings-note">시간표 마지막 갱신: 없음</p>
+
+        <div class="error-log">
+          <h4>시간표 오류 로그</h4>
+          <div id="timetableErrorLog">오류 없음</div>
+        </div>
+      </section>
+
+      <div class="panel-buttons">
+        <button id="btnSaveSidebarSettings">저장</button>
+        <button id="btnCloseSidebarPanel">닫기</button>
+      </div>
+    </aside>
+
+    <aside id="settingsPanel" class="side-panel hidden">
+      <h2>화면 설정</h2>
+      <section class="settings-section">
+        <h3>웹 화면</h3>
+        <div class="form-grid">
+          <label>시작 URL
+            <input id="inputUrl" type="text" placeholder="https://example.com" />
+          </label>
+
+          <label>기본 웹 확대/축소(%)
+            <input id="inputZoomPercent" type="number" min="25" max="300" step="5" />
+          </label>
+
+          <label class="checkbox-row"><input id="checkBlockPopups" type="checkbox" checked /> 웹사이트 팝업 금지</label>
+
+          <label id="popupModeDetail" class="popup-mode-detail">팝업 허용 시 처리 방식
+            <select id="selectPopupMode">
+              <option value="allow">별도 창으로 열기</option>
+              <option value="current">현재 뷰에서 열기</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>레이아웃</h3>
+        <div class="form-grid">
+          <label>분할 비율(프리셋)
+            <select id="selectSplitRatio">
+              <option value="5:5">5:5</option>
+              <option value="6:4">6:4</option>
+              <option value="7:3">7:3</option>
+              <option value="4:6">4:6</option>
+              <option value="3:7">3:7</option>
+            </select>
+          </label>
+
+          <label class="checkbox-row"><input id="checkSwap" type="checkbox" /> 패널 좌우 전환</label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>공지 재생</h3>
+        <div class="form-grid">
+          <label>전환 효과
+            <select id="selectTransition">
+              <option value="none">None</option>
+              <option value="fade">Fade In/Out</option>
+              <option value="slide">Slide</option>
+            </select>
+          </label>
+
+          <label class="checkbox-row"><input id="checkVideoFirst" type="checkbox" /> 영상 우선 재생</label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>창 동작</h3>
+        <div class="form-grid">
+          <label class="checkbox-row"><input id="checkAlwaysOnTop" type="checkbox" /> 항상 최상단 유지</label>
+          <label class="checkbox-row"><input id="checkPreventMin" type="checkbox" /> 최소화 방지</label>
+        </div>
+      </section>
+
+      <div class="panel-buttons">
+        <button id="btnSaveSettings">저장</button>
+        <button id="btnCancelSettings">취소</button>
+        <button id="btnResetDefaults">기본값으로 초기화</button>
+        <button id="btnCloseSettings">닫기</button>
+      </div>
+    </aside>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

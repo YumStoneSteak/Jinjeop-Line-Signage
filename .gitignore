@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+release/
+out/
+*.zip
+*.7z
+*.tar
+*.gz
+*.exe
+*.msi
+*.nupkg
+
+# Runtime files
+.dashboard-runtime/
+*.log
+logs/
+tmp/
+temp/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.json
+*.local
+solar_terms_*.json
+timetable-cache.json
+
+# Electron/user data caches
+Cache/
+Code Cache/
+GPUCache/
+DawnCache/
+Session Storage/
+Local Storage/
+
+# Test and coverage artifacts
+coverage/
+.nyc_output/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo

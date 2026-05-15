@@ -1,0 +1,40 @@
+{
+  "name": "dashboard-260424",
+  "version": "1.0.1",
+  "buildNumber": 44,
+  "description": "Split display app: web browser + media slideshow",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "watchdog": "node launcher.js",
+    "build": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.namyangju.dashboard",
+    "productName": "남양주도시공사 대시보드",
+    "icon": "files/icons/ncuc.ico",
+    "win": {
+      "icon": "files/icons/ncuc.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "keywords": [
+    "electron",
+    "slideshow",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^26.8.1"
+  }
+}
