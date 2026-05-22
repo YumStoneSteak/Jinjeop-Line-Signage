@@ -12,7 +12,7 @@
 
     <aside id="fullscreenSidebar" class="fullscreen-sidebar" aria-label="Fullscreen dashboard sidebar">
       <div class="sidebar-logo-slot">
-        <img id="sidebarLogoImage" src="../files/ncuc_logo.png" alt="Company Logo" onerror="this.style.display='none'" />
+        <img id="sidebarLogoImage" src="../files/logos/ncuc_logo.png" alt="Company Logo" onerror="this.style.display='none'" />
       </div>
 
       <div class="sidebar-widget sidebar-time-card">
@@ -31,7 +31,10 @@
       <div id="dailyAdviceWidget" class="sidebar-widget daily-advice-card hidden" aria-label="오늘의 한마디">
         <div class="daily-advice-title">오늘의 한마디</div>
         <div id="dailyAdviceMessage" class="daily-advice-message">오늘도 좋은 하루 보내세요.</div>
-        <div id="dailyAdviceAuthor" class="daily-advice-author hidden"></div>
+        <div id="dailyAdviceAuthor" class="daily-advice-author hidden">
+          <span id="dailyAdviceAuthorName" class="daily-advice-author-name"></span>
+          <span id="dailyAdviceAuthorProfile" class="daily-advice-author-profile"></span>
+        </div>
       </div>
 
       <div id="nextTrainWidget" class="sidebar-widget next-train-card hidden" aria-label="다음 열차">
@@ -58,6 +61,10 @@
           <div id="weatherTemp" class="weather-temp">--°</div>
           <div id="weatherFeelsLike" class="weather-feels-inline">체감 --°</div>
         </div>
+      </div>
+
+      <div id="multiInfoWidget" class="sidebar-widget multi-info-card hidden" aria-label="멀티 위젯">
+        <div id="multiInfoContent" class="multi-info-content"></div>
       </div>
 
       <div class="weather-duo">
@@ -102,22 +109,29 @@
     <div id="weatherUpdateStatus" class="weather-update-status">날씨 업데이트 대기 중</div>
 
     <header id="toolbar">
-      <div class="toolbar-title">남양주도시공사 진접선 열차 행선안내 현시 (v1.0.1 build 44)</div>
+      <div class="toolbar-title">남양주도시공사 진접선 열차 행선안내 현시 (v1.1.0)</div>
       <div class="toolbar-actions">
-        <button id="btnFullscreen">전체화면 시작</button>
-        <button id="btnSidebarSettings">좌측 바</button>
+        <button id="btnSidebarSettings">위젯 설정</button>
         <button id="btnScreenSettings">화면 설정</button>
-        <button id="btnFileManager">파일 관리</button>
-        <button id="btnExit" class="danger">종료</button>
+        <button id="btnFileManager">공지 파일 관리</button>
+        <button id="btnFullscreen">현시 모드 시작</button>
+        <div class="window-controls" aria-label="창 제어">
+          <button id="btnWindowMinimize" class="window-control" type="button">최소화</button>
+          <button id="btnWindowMaximize" class="window-control" type="button">전체화면</button>
+          <button id="btnWindowClose" class="window-control close" type="button">종료</button>
+        </div>
       </div>
     </header>
 
     <main id="splitRoot">
       <section id="panelBrowser" class="panel">
-        <div id="browserTitleWidget" class="panel-title-widget browser-title-widget" role="button" tabindex="0" title="4호선 보기">
-          <span>진접선 열차 위치 정보</span>
+        <div class="browser-title-cluster">
+          <div id="browserTitleWidget" class="panel-title-widget browser-title-widget" role="button" tabindex="0" title="클릭 시 새로고침 & 4호선 선택">
+            <span class="browser-title-main">진접선 열차 위치 정보</span>
+            <span class="browser-title-hint" aria-hidden="true">클릭 시 새로고침 & 4호선 선택</span>
+          </div>
+          <div id="zoomStatus" class="zoom-status">125%</div>
         </div>
-        <div id="zoomStatus" class="zoom-status">125%</div>
         <webview id="browserView" src="about:blank"></webview>
       </section>
 
@@ -135,12 +149,13 @@
     </main>
 
     <aside id="filePanel" class="side-panel hidden">
-      <h2>파일 관리</h2>
+      <h2>공지 파일 관리</h2>
       <section class="settings-section">
         <h3>파일 작업</h3>
         <div class="panel-buttons">
           <button id="btnAddFiles">파일 추가</button>
           <button id="btnCheckMissing">누락 파일 확인</button>
+          <button id="btnResetAppDefaults" class="danger" type="button">앱 전체 초기화</button>
           <button id="btnCloseFilePanel">닫기</button>
         </div>
       </section>
@@ -165,7 +180,7 @@
     </aside>
 
     <aside id="sidebarPanel" class="side-panel hidden">
-      <h2>좌측 바</h2>
+      <h2>위젯 설정</h2>
 
       <section class="settings-section">
         <h3>날씨 위젯</h3>
@@ -216,6 +231,7 @@
 
       <div class="panel-buttons">
         <button id="btnSaveSidebarSettings">저장</button>
+        <button id="btnResetSidebarDefaults" type="button">기본값으로 초기화</button>
         <button id="btnCloseSidebarPanel">닫기</button>
       </div>
     </aside>
@@ -226,7 +242,7 @@
         <h3>웹 화면</h3>
         <div class="form-grid">
           <label>시작 URL
-            <input id="inputUrl" type="text" placeholder="https://example.com" />
+            <input id="inputUrl" type="text" placeholder="https://smss.seoulmetro.co.kr/traininfo/traininfoUserView.do" />
           </label>
 
           <label>기본 웹 확대/축소(%)
@@ -271,16 +287,32 @@
               <option value="slide">Slide</option>
             </select>
           </label>
-
-          <label class="checkbox-row"><input id="checkVideoFirst" type="checkbox" /> 영상 우선 재생</label>
         </div>
       </section>
 
       <section class="settings-section">
         <h3>창 동작</h3>
         <div class="form-grid">
-          <label class="checkbox-row"><input id="checkAlwaysOnTop" type="checkbox" /> 항상 최상단 유지</label>
-          <label class="checkbox-row"><input id="checkPreventMin" type="checkbox" /> 최소화 방지</label>
+          <label class="checkbox-row">
+            <input id="checkAlwaysOnTop" type="checkbox" />
+            <span>항상 최상단 유지</span>
+            <span
+              class="tooltip-help"
+              tabindex="0"
+              aria-label="다른 프로그램 창보다 대시보드 창을 위에 유지합니다."
+              data-tooltip="다른 프로그램 창보다 대시보드 창을 위에 유지합니다."
+            >?</span>
+          </label>
+          <label class="checkbox-row">
+            <input id="checkPreventMin" type="checkbox" />
+            <span>최소화 방지</span>
+            <span
+              class="tooltip-help"
+              tabindex="0"
+              aria-label="실수로 창이 최소화되지 않도록 최소화 동작을 막습니다."
+              data-tooltip="실수로 창이 최소화되지 않도록 최소화 동작을 막습니다."
+            >?</span>
+          </label>
         </div>
       </section>
 
@@ -292,6 +324,8 @@
       </div>
     </aside>
 
+    <script src="../config-defaults.js"></script>
+    <script src="../air-quality.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>

@@ -93,13 +93,13 @@ portable 빌드 결과도 `dist` 폴더에 생성됩니다.
 
 ## 리소스 파일 위치
 
-- 기본 로고: `files/ncuc_logo.png`
+- 기본 로고: 실행 파일 기준 `files/logos/ncuc_logo.png`
 - 로고 보관: `files/logos/`
 - 공지 이미지/영상: `files/notices/`
 - 빌드용 앱 아이콘: `files/icons/ncuc.ico`
 - 일반 PNG/JPG 이미지 리소스: `files/images/`
 
-좌측 바의 회사 로고는 앱 안의 `좌측 바 > 기본 정보 설정 > 로고 파일 경로`에서 변경할 수 있습니다. 기본값은 `files/ncuc_logo.png`입니다.
+좌측 바의 회사 로고는 앱 안의 `좌측 바 > 기본 정보 설정 > 로고 파일 경로`에서 변경할 수 있습니다. 기본값은 실행 파일 기준 `files/logos/ncuc_logo.png`입니다.
 
 ## 운영 환경
 

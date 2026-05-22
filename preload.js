@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('desktopAPI', {
   getConfig: () => ipcRenderer.invoke('config:get'),
+  getDefaultConfig: () => ipcRenderer.invoke('config:getDefaults'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
   updateDraft: (config) => ipcRenderer.invoke('config:updateDraft', config),
   setDirty: (isDirty) => ipcRenderer.invoke('config:setDirty', isDirty),
@@ -13,6 +14,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
 
   setAlwaysOnTop: (enabled) => ipcRenderer.invoke('window:setAlwaysOnTop', enabled),
   setPreventMinimize: (enabled) => ipcRenderer.invoke('window:setPreventMinimize', enabled),
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
   setFullscreen: (enabled) => ipcRenderer.invoke('window:setFullscreen', enabled),
   toggleFullscreen: () => ipcRenderer.invoke('window:toggleFullscreen'),
   isFullscreen: () => ipcRenderer.invoke('window:isFullscreen'),

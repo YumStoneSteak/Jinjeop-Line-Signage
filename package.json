@@ -1,11 +1,12 @@
 {
   "name": "dashboard-260424",
-  "version": "1.0.1",
-  "buildNumber": 44,
+  "version": "1.1.0",
   "description": "Split display app: web browser + media slideshow",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "start:local": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\run-dashboard-local.ps1",
+    "prepare:local": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\run-dashboard-local.ps1 -NoLaunch",
     "watchdog": "node launcher.js",
     "build": "electron-builder --win"
   },
@@ -24,7 +25,16 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "extraFiles": [
+      {
+        "from": "files",
+        "to": "files",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
   },
   "keywords": [
     "electron",

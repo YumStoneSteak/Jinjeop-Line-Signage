@@ -1,8 +1,14 @@
-const { app, BrowserWindow, dialog, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, screen, session } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const path = require('path');
+const {
+  DEFAULT_LOGO_RELATIVE_PATH,
+  SIDEBAR_WIDGET_DEFAULTS_VERSION,
+  defaultSidebarWidgets,
+  createDefaultConfig
+} = require('./config-defaults');
 
 let mainWindow;
 let popupWindows = [];
@@ -12,6 +18,17 @@ let persistedConfig = null;
 let bypassClosePrompt = false;
 let presentationMode = true;
 let lastPopupRequest = { url: '', mode: '', at: 0 };
+let allowProgrammaticMinimize = false;
+let lastSmssSuccessAt = null;
+let smssWebRequestWatchdogInstalled = false;
+let smssWatchdogTimer = null;
+let smssLogFilePath = null;
+let smssLogFileUnavailable = false;
+
+const SMSS_HOST = 'smss.seoulmetro.co.kr';
+const SMSS_WEBREQUEST_FILTER = { urls: [`*://${SMSS_HOST}/*`] };
+const smssDiagnosticContents = new Set();
+const smssConsoleForwardContents = new Set();
 
 const ADVICE_API_URL = 'https://korean-advice-open-api.vercel.app/api/advice';
 const fallbackAdvice = {
@@ -20,54 +37,35 @@ const fallbackAdvice = {
   authorProfile: ''
 };
 
-const defaultSidebarWidgets = [
-  { id: 'logo', label: '로고', visible: true },
-  { id: 'station', label: '현재 역명', visible: true },
-  { id: 'datetime', label: '날짜/시간', visible: true },
-  { id: 'weather', label: '날씨', visible: true },
-  { id: 'solarTerm', label: '24절기', visible: true },
-  { id: 'dailyAdvice', label: '오늘의 한마디', visible: true },
-  { id: 'trainSchedule', label: '열차 시간표', visible: false }
-];
-const SIDEBAR_WIDGET_DEFAULTS_VERSION = 4;
-const legacyDefaultSidebarWidgetOrders = [
-  ['logo', 'station', 'datetime', 'solarTerm', 'dailyAdvice', 'weather', 'trainSchedule']
-];
+function getRuntimeBasePath() {
+  return app.isPackaged ? path.dirname(process.execPath) : __dirname;
+}
 
-const defaultConfig = {
-  layout: {
-    splitRatio: '7:3',
-    borderEnabled: false,
-    panelSwapped: false
-  },
-  browser: {
-    url: 'https://example.com',
-    popupMode: 'block',
-    zoomPercent: 125
-  },
-  player: {
-    transition: 'slide',
-    videoFirstMode: true,
-    playlist: []
-  },
-  window: {
-    alwaysOnTop: true,
-    preventMinimize: true
-  },
+function getRuntimeRelativePath(relativePath) {
+  const parts = String(relativePath || '')
+    .replace(/^[\\/]+/, '')
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  return path.join(getRuntimeBasePath(), ...parts);
+}
+
+function getDefaultLogoPath() {
+  const logoParts = DEFAULT_LOGO_RELATIVE_PATH.split('/');
+  const candidates = [
+    path.join(getRuntimeBasePath(), ...logoParts),
+    path.join(__dirname, ...logoParts),
+    process.resourcesPath ? path.join(process.resourcesPath, ...logoParts) : '',
+    process.resourcesPath ? path.join(process.resourcesPath, 'app', ...logoParts) : ''
+  ].filter(Boolean);
+  const uniqueCandidates = [...new Set(candidates)];
+  return uniqueCandidates.find((candidate) => fs.existsSync(candidate)) || uniqueCandidates[0];
+}
+
+const defaultConfig = createDefaultConfig({
   sidebar: {
-    width: 320,
-    logoPath: 'files/ncuc_logo.png',
-    widgetDefaultsVersion: SIDEBAR_WIDGET_DEFAULTS_VERSION,
-    widgets: defaultSidebarWidgets.map((widget) => ({ ...widget })),
-    timetable: {
-      stationName: '별내별가람역',
-      stationId: '0408',
-      stationCode: '408',
-      direction: '하행',
-      displayFormat: 'table'
-    }
+    logoPath: getDefaultLogoPath()
   }
-};
+});
 
 const timetableStations = {
   '408': { stationName: '별내별가람역', stationId: '0408', stationCode: '408' },
@@ -103,6 +101,419 @@ function normalizeUrl(rawUrl) {
   }
 }
 
+function getSmssLogTime() {
+  return new Date().toISOString();
+}
+
+function getSmssLogFilePath() {
+  if (smssLogFilePath || smssLogFileUnavailable) {
+    return smssLogFilePath;
+  }
+
+  const candidates = [
+    path.join(__dirname, 'logs', 'smss-diagnostics.log')
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(candidate), { recursive: true });
+      fs.appendFileSync(candidate, '', 'utf-8');
+      smssLogFilePath = candidate;
+      return smssLogFilePath;
+    } catch (_) {
+      // Try the next writable location.
+    }
+  }
+
+  smssLogFileUnavailable = true;
+  return null;
+}
+
+function writeSmssLogLine(line) {
+  console.log(line);
+
+  const logFilePath = getSmssLogFilePath();
+  if (!logFilePath) {
+    return;
+  }
+
+  fs.appendFile(logFilePath, `${line}\n`, 'utf-8', () => {});
+}
+
+function logSmss(prefix, payload) {
+  writeSmssLogLine(`${prefix} ${JSON.stringify({
+    time: getSmssLogTime(),
+    ...payload
+  })}`);
+}
+
+function isSmssUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    return false;
+  }
+
+  try {
+    return new URL(rawUrl).hostname === SMSS_HOST;
+  } catch (_) {
+    return false;
+  }
+}
+
+function safeIsDestroyed(contents) {
+  try {
+    return !contents || contents.isDestroyed?.() === true;
+  } catch (_) {
+    return true;
+  }
+}
+
+function safeWebContentsUrl(contents) {
+  if (safeIsDestroyed(contents)) {
+    return 'destroyed';
+  }
+
+  try {
+    return contents.getURL();
+  } catch (err) {
+    return `unavailable: ${err.message || err}`;
+  }
+}
+
+function getBackgroundThrottlingState(webPreferences) {
+  const hasExplicitValue = !!webPreferences
+    && Object.prototype.hasOwnProperty.call(webPreferences, 'backgroundThrottling');
+  const explicit = hasExplicitValue ? webPreferences.backgroundThrottling : 'undefined';
+  return {
+    explicit,
+    effective: hasExplicitValue ? !!webPreferences.backgroundThrottling : true
+  };
+}
+
+function logBackgroundThrottling(scope, webPreferences, extra = {}) {
+  logSmss('[SMSS VIEW]', {
+    event: 'background-throttling',
+    scope,
+    backgroundThrottling: getBackgroundThrottlingState(webPreferences),
+    ...extra
+  });
+}
+
+function getSmssWebContentsState(contents) {
+  if (safeIsDestroyed(contents)) {
+    return {
+      url: 'destroyed',
+      isLoading: false,
+      isDestroyed: true
+    };
+  }
+
+  let isLoading = false;
+  try {
+    isLoading = contents.isLoading();
+  } catch (_) {
+    isLoading = false;
+  }
+
+  return {
+    url: safeWebContentsUrl(contents),
+    isLoading,
+    isDestroyed: false
+  };
+}
+
+function readSmssDocumentState(contents) {
+  if (safeIsDestroyed(contents) || typeof contents.executeJavaScript !== 'function') {
+    return Promise.resolve({
+      documentStateError: 'webContents unavailable'
+    });
+  }
+
+  return contents.executeJavaScript(`
+    (() => ({
+      href: location.href,
+      visibilityState: document.visibilityState,
+      hidden: document.hidden
+    }))()
+  `, false).catch((err) => ({
+    documentStateError: err?.message || String(err)
+  }));
+}
+
+function logSmssViewEvent(contents, event, details = {}) {
+  const contentsState = getSmssWebContentsState(contents);
+  readSmssDocumentState(contents).then((documentState) => {
+    logSmss('[SMSS VIEW]', {
+      event,
+      ...contentsState,
+      ...details,
+      document: documentState
+    });
+  }).catch((err) => {
+    logSmss('[SMSS VIEW]', {
+      event,
+      ...contentsState,
+      ...details,
+      document: {
+        documentStateError: err?.message || String(err)
+      }
+    });
+  });
+}
+
+const SMSS_INPAGE_DIAGNOSTIC_SCRIPT = `
+  (() => {
+    const prefix = '[SMSS INPAGE]';
+    const buildPayload = (event, extra = {}) => ({
+      event,
+      time: new Date().toISOString(),
+      href: location.href,
+      visibilityState: document.visibilityState,
+      hidden: document.hidden,
+      ...extra
+    });
+    const log = (event, extra = {}) => {
+      try {
+        console.log(prefix + ' ' + JSON.stringify(buildPayload(event, extra)));
+      } catch (err) {
+        console.log(prefix + ' ' + event);
+      }
+    };
+
+    if (window.__SMSS_INPAGE_DIAG_INSTALLED__) {
+      log('already-installed');
+      return true;
+    }
+
+    window.__SMSS_INPAGE_DIAG_INSTALLED__ = true;
+    log('installed');
+
+    window.addEventListener('beforeunload', () => {
+      log('beforeunload');
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      log('visibilitychange');
+    });
+
+    window.addEventListener('error', (event) => {
+      log('error', {
+        message: event.message,
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno
+      });
+    });
+
+    window.addEventListener('unhandledrejection', (event) => {
+      const reason = event.reason;
+      log('unhandledrejection', {
+        reason: reason?.stack || reason?.message || String(reason)
+      });
+    });
+
+    setInterval(() => {
+      log('alive');
+    }, 5000);
+
+    return true;
+  })();
+`;
+
+function injectSmssInPageDiagnostics(contents) {
+  if (safeIsDestroyed(contents) || typeof contents.executeJavaScript !== 'function') {
+    return;
+  }
+
+  const currentUrl = safeWebContentsUrl(contents);
+  if (!isSmssUrl(currentUrl)) {
+    return;
+  }
+
+  contents.executeJavaScript(SMSS_INPAGE_DIAGNOSTIC_SCRIPT, false)
+    .then(() => {
+      logSmssViewEvent(contents, 'inpage-diagnostics-injected');
+    })
+    .catch((err) => {
+      logSmssViewEvent(contents, 'inpage-diagnostics-inject-failed', {
+        error: err?.message || String(err)
+      });
+    });
+}
+
+function attachSmssConsoleForwarding(contents, source) {
+  if (!contents || smssConsoleForwardContents.has(contents.id)) {
+    return;
+  }
+
+  smssConsoleForwardContents.add(contents.id);
+  contents.once('destroyed', () => {
+    smssConsoleForwardContents.delete(contents.id);
+  });
+
+  contents.on('console-message', (_event, levelOrDetails, message, line, sourceId) => {
+    const details = typeof levelOrDetails === 'object' && levelOrDetails !== null
+      ? levelOrDetails
+      : { level: levelOrDetails, message, line, sourceId };
+    const text = String(details.message || '');
+    if (!/^\[SMSS (VIEW|INPAGE|WEBREQUEST|WATCHDOG)\]/.test(text)) {
+      return;
+    }
+    writeSmssLogLine(text);
+  });
+
+  logSmss('[SMSS VIEW]', {
+    event: 'console-forwarding-attached',
+    source,
+    contentsId: contents.id
+  });
+}
+
+function attachSmssViewDiagnostics(contents) {
+  if (!contents || smssDiagnosticContents.has(contents.id)) {
+    return;
+  }
+
+  smssDiagnosticContents.add(contents.id);
+  contents.once('destroyed', () => {
+    smssDiagnosticContents.delete(contents.id);
+  });
+
+  attachSmssConsoleForwarding(contents, 'smss-webview');
+  logSmssViewEvent(contents, 'diagnostics-attached', {
+    contentsId: contents.id
+  });
+
+  contents.on('did-start-loading', () => {
+    logSmssViewEvent(contents, 'did-start-loading');
+  });
+
+  contents.on('did-stop-loading', () => {
+    logSmssViewEvent(contents, 'did-stop-loading');
+    injectSmssInPageDiagnostics(contents);
+  });
+
+  contents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame, frameProcessId, frameRoutingId) => {
+    logSmssViewEvent(contents, 'did-start-navigation', {
+      navigationUrl: url,
+      isInPlace,
+      isMainFrame,
+      frameProcessId,
+      frameRoutingId
+    });
+  });
+
+  contents.on('did-navigate', (_event, url, httpResponseCode, httpStatusText) => {
+    logSmssViewEvent(contents, 'did-navigate', {
+      navigationUrl: url,
+      httpResponseCode,
+      httpStatusText
+    });
+  });
+
+  contents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame, frameProcessId, frameRoutingId) => {
+    logSmssViewEvent(contents, 'did-fail-load', {
+      errorCode,
+      errorDescription,
+      validatedURL,
+      isMainFrame,
+      frameProcessId,
+      frameRoutingId
+    });
+  });
+
+  contents.on('dom-ready', () => {
+    logSmssViewEvent(contents, 'dom-ready');
+    injectSmssInPageDiagnostics(contents);
+  });
+
+  contents.on('did-finish-load', () => {
+    logSmssViewEvent(contents, 'did-finish-load');
+    injectSmssInPageDiagnostics(contents);
+  });
+
+  contents.on('unresponsive', () => {
+    logSmssViewEvent(contents, 'unresponsive');
+  });
+
+  contents.on('responsive', () => {
+    logSmssViewEvent(contents, 'responsive');
+  });
+
+  contents.on('render-process-gone', (_event, details) => {
+    logSmssViewEvent(contents, 'render-process-gone', {
+      details
+    });
+  });
+
+  contents.on('crashed', (_event, killed) => {
+    logSmssViewEvent(contents, 'crashed', {
+      killed
+    });
+  });
+}
+
+function installSmssWebRequestWatchdog() {
+  if (smssWebRequestWatchdogInstalled) {
+    return;
+  }
+
+  smssWebRequestWatchdogInstalled = true;
+
+  session.defaultSession.webRequest.onBeforeRequest(SMSS_WEBREQUEST_FILTER, (details, callback) => {
+    logSmss('[SMSS WEBREQUEST]', {
+      event: 'onBeforeRequest',
+      requestId: details.id,
+      method: details.method,
+      resourceType: details.resourceType,
+      url: details.url
+    });
+    callback({ cancel: false });
+  });
+
+  session.defaultSession.webRequest.onCompleted(SMSS_WEBREQUEST_FILTER, (details) => {
+    if (details.statusCode >= 200 && details.statusCode <= 399) {
+      lastSmssSuccessAt = Date.now();
+    }
+
+    logSmss('[SMSS WEBREQUEST]', {
+      event: 'onCompleted',
+      requestId: details.id,
+      method: details.method,
+      resourceType: details.resourceType,
+      statusCode: details.statusCode,
+      url: details.url
+    });
+  });
+
+  session.defaultSession.webRequest.onErrorOccurred(SMSS_WEBREQUEST_FILTER, (details) => {
+    logSmss('[SMSS WEBREQUEST]', {
+      event: 'onErrorOccurred',
+      requestId: details.id,
+      method: details.method,
+      resourceType: details.resourceType,
+      error: details.error,
+      url: details.url
+    });
+  });
+
+  smssWatchdogTimer = setInterval(() => {
+    const now = Date.now();
+    logSmss('[SMSS WATCHDOG]', {
+      event: 'last-success-check',
+      lastSmssSuccessAt: lastSmssSuccessAt ? new Date(lastSmssSuccessAt).toISOString() : null,
+      secondsSinceLastSmssSuccess: lastSmssSuccessAt ? Math.round((now - lastSmssSuccessAt) / 1000) : null
+    });
+  }, 30000);
+  smssWatchdogTimer.unref?.();
+
+  logSmss('[SMSS WATCHDOG]', {
+    event: 'started',
+    host: SMSS_HOST,
+    intervalSeconds: 30,
+    logFilePath: getSmssLogFilePath()
+  });
+}
+
 function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
 }
@@ -135,7 +546,19 @@ function normalizeLogoPath(input) {
   }
 
   const trimmed = input.trim();
-  return trimmed || defaultConfig.sidebar.logoPath;
+  if (!trimmed) {
+    return defaultConfig.sidebar.logoPath;
+  }
+
+  if (/^[\\/](?![\\/])/.test(trimmed)) {
+    return getRuntimeRelativePath(trimmed);
+  }
+
+  return trimmed;
+}
+
+function normalizeTransition(value) {
+  return ['none', 'fade', 'slide'].includes(value) ? value : defaultConfig.player.transition;
 }
 
 function normalizeSolarTermYear(yearInput) {
@@ -242,22 +665,32 @@ function normalizeTimetableSettings(input) {
   };
 }
 
-function sameWidgetOrder(left, right) {
-  return left.length === right.length && left.every((id, index) => id === right[index]);
+function normalizeMultiWidgetSettings(input) {
+  const defaults = defaultConfig.sidebar.multiWidget || {
+    enabledItems: ['solarTerm', 'dailyAdvice'],
+    transition: 'slide',
+    intervalSeconds: 10
+  };
+  const allowedItems = new Set(['solarTerm', 'dailyAdvice']);
+  const sourceItems = Array.isArray(input?.enabledItems) ? input.enabledItems : defaults.enabledItems;
+  const enabledItems = sourceItems.filter((item) => allowedItems.has(item));
+  const numericInterval = Number.parseInt(input?.intervalSeconds, 10);
+
+  return {
+    enabledItems,
+    transition: ['none', 'fade', 'slide'].includes(input?.transition) ? input.transition : defaults.transition,
+    intervalSeconds: Number.isFinite(numericInterval)
+      ? Math.min(60, Math.max(5, numericInterval))
+      : defaults.intervalSeconds
+  };
 }
 
-function normalizeSidebarWidgets(input, widgetDefaultsVersion = SIDEBAR_WIDGET_DEFAULTS_VERSION) {
+function normalizeSidebarWidgets(input) {
   const defaultsById = new Map(defaultSidebarWidgets.map((widget) => [widget.id, widget]));
   const defaultIndexById = new Map(defaultSidebarWidgets.map((widget, index) => [widget.id, index]));
   const result = [];
   const seen = new Set();
   const source = Array.isArray(input) ? input : [];
-  const shouldApplyNewDefaults = Number(widgetDefaultsVersion) !== SIDEBAR_WIDGET_DEFAULTS_VERSION;
-  const sourceOrder = source
-    .map((item) => item?.id)
-    .filter((id) => defaultsById.has(id));
-  const shouldMigrateDefaultOrder = shouldApplyNewDefaults
-    && legacyDefaultSidebarWidgetOrders.some((order) => sameWidgetOrder(sourceOrder, order));
 
   const insertByDefaultOrder = (widget) => {
     const targetIndex = defaultIndexById.get(widget.id) ?? defaultSidebarWidgets.length;
@@ -277,7 +710,7 @@ function normalizeSidebarWidgets(input, widgetDefaultsVersion = SIDEBAR_WIDGET_D
     seen.add(defaults.id);
     result.push({
       ...defaults,
-      visible: shouldApplyNewDefaults && defaults.id === 'trainSchedule' ? false : item.visible !== false
+      visible: item.visible !== false
     });
   });
 
@@ -286,16 +719,6 @@ function normalizeSidebarWidgets(input, widgetDefaultsVersion = SIDEBAR_WIDGET_D
       insertByDefaultOrder({ ...defaults });
     }
   });
-
-  if (shouldMigrateDefaultOrder) {
-    result.sort((a, b) => (defaultIndexById.get(a.id) ?? defaultSidebarWidgets.length) - (defaultIndexById.get(b.id) ?? defaultSidebarWidgets.length));
-  }
-
-  const trainIndex = result.findIndex((widget) => widget.id === 'trainSchedule');
-  if (trainIndex >= 0 && result[trainIndex].visible === false) {
-    const [trainWidget] = result.splice(trainIndex, 1);
-    result.push(trainWidget);
-  }
 
   return result;
 }
@@ -566,8 +989,7 @@ function mergeConfig(userConfig) {
       zoomPercent: normalizeZoomPercent(browserConfig.zoomPercent)
     },
     player: {
-      ...defaultConfig.player,
-      ...(userConfig.player || {}),
+      transition: normalizeTransition(userConfig.player?.transition),
       playlist: Array.isArray(userConfig?.player?.playlist) ? userConfig.player.playlist : []
     },
     window: { ...defaultConfig.window, ...(userConfig.window || {}) },
@@ -576,10 +998,20 @@ function mergeConfig(userConfig) {
       ...(userConfig.sidebar || {}),
       logoPath: normalizeLogoPath(userConfig.sidebar?.logoPath),
       widgetDefaultsVersion: SIDEBAR_WIDGET_DEFAULTS_VERSION,
-      widgets: normalizeSidebarWidgets(userConfig.sidebar?.widgets, userConfig.sidebar?.widgetDefaultsVersion),
+      widgets: normalizeSidebarWidgets(userConfig.sidebar?.widgets),
+      multiWidget: normalizeMultiWidgetSettings(userConfig.sidebar?.multiWidget),
       timetable: normalizeTimetableSettings(userConfig.sidebar?.timetable || defaultConfig.sidebar.timetable)
     }
   };
+}
+
+function hasUnknownPlayerConfig(config) {
+  const playerConfig = config?.player;
+  if (!playerConfig || typeof playerConfig !== 'object') {
+    return false;
+  }
+  const allowedKeys = new Set(['transition', 'playlist']);
+  return Object.keys(playerConfig).some((key) => !allowedKeys.has(key));
 }
 
 function decodeHtmlEntities(text) {
@@ -918,6 +1350,9 @@ function loadConfig() {
     const parsed = JSON.parse(raw);
     persistedConfig = mergeConfig(parsed);
     draftConfig = deepClone(persistedConfig);
+    if (hasUnknownPlayerConfig(parsed)) {
+      fs.writeFileSync(configPath, JSON.stringify(persistedConfig, null, 2), 'utf-8');
+    }
   } catch (err) {
     console.error('Failed to load config. Falling back to defaults:', err);
     persistedConfig = deepClone(defaultConfig);
@@ -966,6 +1401,13 @@ function applyPresentationWindowMode() {
 }
 
 function createMainWindow() {
+  const mainWindowWebPreferences = {
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    webviewTag: true
+  };
+
   mainWindow = new BrowserWindow({
     width: 1600,
     height: 900,
@@ -973,18 +1415,21 @@ function createMainWindow() {
     show: false,
     autoHideMenuBar: true,
     icon: getAppIconPath(),
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      webviewTag: true
-    }
+    webPreferences: mainWindowWebPreferences
   });
+
+  logBackgroundThrottling('main-window', mainWindowWebPreferences);
+  attachSmssConsoleForwarding(mainWindow.webContents, 'main-renderer');
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   applyWindowOptions();
 
-  mainWindow.webContents.on('will-attach-webview', (_event, _webPreferences, params) => {
+  mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, params) => {
+    logBackgroundThrottling('webview', webPreferences, {
+      src: params?.src || null,
+      partition: params?.partition || null
+    });
+
     if (getPopupMode() === 'block' && params) {
       delete params.allowpopups;
     }
@@ -993,6 +1438,7 @@ function createMainWindow() {
   mainWindow.webContents.on('did-attach-webview', (_event, webContents) => {
     attachPopupGuards(webContents);
     attachBrowserZoomControls(webContents);
+    attachSmssViewDiagnostics(webContents);
   });
 
   mainWindow.once('ready-to-show', () => {
@@ -1001,6 +1447,10 @@ function createMainWindow() {
   });
 
   mainWindow.on('minimize', (event) => {
+    if (allowProgrammaticMinimize) {
+      allowProgrammaticMinimize = false;
+      return;
+    }
     if (persistedConfig?.window?.preventMinimize) {
       event.preventDefault();
     }
@@ -1105,6 +1555,7 @@ app.on('web-contents-created', (_event, contents) => {
 
 app.whenReady().then(() => {
   loadConfig();
+  installSmssWebRequestWatchdog();
   createMainWindow();
 
   screen.on('display-metrics-changed', () => {
@@ -1126,7 +1577,16 @@ app.on('window-all-closed', () => {
   }
 });
 
+app.on('before-quit', () => {
+  if (smssWatchdogTimer) {
+    clearInterval(smssWatchdogTimer);
+    smssWatchdogTimer = null;
+  }
+});
+
 ipcMain.handle('config:get', () => deepClone(persistedConfig || defaultConfig));
+
+ipcMain.handle('config:getDefaults', () => deepClone(defaultConfig));
 
 ipcMain.handle('config:save', (_, config) => {
   const saved = writeConfig(config);
@@ -1182,6 +1642,34 @@ ipcMain.handle('window:setPreventMinimize', (_, enabled) => {
     return false;
   }
   persistedConfig.window.preventMinimize = !!enabled;
+  return true;
+});
+
+ipcMain.handle('window:minimize', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    allowProgrammaticMinimize = true;
+    mainWindow.minimize();
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('window:toggleMaximize', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+
+  if (presentationMode) {
+    presentationMode = false;
+    mainWindow.webContents.send('window:fullscreenChanged', false);
+  }
+
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+    return false;
+  }
+
+  mainWindow.maximize();
   return true;
 });
 

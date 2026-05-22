@@ -1,16 +1,10 @@
-const defaultSidebarWidgets = [
-  { id: 'logo', label: '로고', visible: true },
-  { id: 'station', label: '현재 역명', visible: true },
-  { id: 'datetime', label: '날짜/시간', visible: true },
-  { id: 'weather', label: '날씨', visible: true },
-  { id: 'solarTerm', label: '24절기', visible: true },
-  { id: 'dailyAdvice', label: '오늘의 한마디', visible: true },
-  { id: 'trainSchedule', label: '열차 시간표', visible: false }
-];
-const SIDEBAR_WIDGET_DEFAULTS_VERSION = 4;
-const legacyDefaultSidebarWidgetOrders = [
-  ['logo', 'station', 'datetime', 'solarTerm', 'dailyAdvice', 'weather', 'trainSchedule']
-];
+const {
+  DEFAULT_LOGO_RELATIVE_PATH,
+  SIDEBAR_WIDGET_DEFAULTS_VERSION,
+  defaultSidebarWidgets,
+  createDefaultConfig
+} = window.dashboardConfigDefaults;
+const { getKoreanAirQuality } = window.dashboardAirQuality;
 const fallbackDailyAdvice = {
   message: '오늘도 좋은 하루 보내세요.',
   author: '',
@@ -45,40 +39,7 @@ const solarTermDescriptions = {
   '대한': '🧤 일 년을 매듭짓는 가장 추운 날, 겨울의 절정입니다.'
 };
 
-const defaultConfig = {
-  layout: {
-    splitRatio: '7:3',
-    borderEnabled: false,
-    panelSwapped: false
-  },
-  browser: {
-    url: 'https://example.com',
-    popupMode: 'block',
-    zoomPercent: 125
-  },
-  player: {
-    transition: 'slide',
-    videoFirstMode: true,
-    playlist: []
-  },
-  window: {
-    alwaysOnTop: true,
-    preventMinimize: true
-  },
-  sidebar: {
-    width: 320,
-    logoPath: 'files/ncuc_logo.png',
-    widgetDefaultsVersion: SIDEBAR_WIDGET_DEFAULTS_VERSION,
-    widgets: defaultSidebarWidgets.map((widget) => ({ ...widget })),
-    timetable: {
-      stationName: '별내별가람역',
-      stationId: '0408',
-      stationCode: '408',
-      direction: '하행',
-      displayFormat: 'table'
-    }
-  }
-};
+let defaultConfig = createDefaultConfig();
 
 const trainStations = {
   '408': { stationName: '별내별가람역', stationId: '0408', stationCode: '408', latitude: 37.667839, longitude: 127.116333 },
@@ -93,11 +54,13 @@ const state = {
   isPaused: false,
   currentIndex: 0,
   slideTimer: null,
+  activeSlideKey: '',
   dragIndex: null,
   sidebarWidgetDragIndex: null,
   tempToolbarTimer: null,
   weatherTimer: null,
   uiIdleTimer: null,
+  browserTitleHintTimer: null,
   clockTimer: null,
   timetableCache: null,
   timetableTimer: null,
@@ -106,15 +69,24 @@ const state = {
   solarTermYears: {},
   solarTermTimer: null,
   solarTermLoading: false,
+  multiInfoTimer: null,
+  multiInfoActiveIndex: 0,
+  multiInfoRenderKey: '',
+  multiInfoTimerKey: '',
+  dailyAdviceData: null,
   adviceTimer: null,
   adviceLoading: false,
   weatherLastUpdatedAt: null,
+  weatherLoadFailed: false,
+  smssLastAliveAt: null,
   statusOverrideTimer: null,
   autoLine4Timer: null,
   autoLine4Attempts: 0,
   autoLine4Triggered: false,
   autoLine4TargetUrl: '',
-  browserRequestedUrl: ''
+  pendingLine4ZoomInClicks: 0,
+  browserRequestedUrl: '',
+  smssLayoutFullscreenState: null
 };
 
 const els = {
@@ -142,9 +114,13 @@ const els = {
   solarTermPrimary: document.getElementById('solarTermPrimary'),
   solarTermDate: document.getElementById('solarTermDate'),
   solarTermDescription: document.getElementById('solarTermDescription'),
+  multiInfoWidget: document.getElementById('multiInfoWidget'),
+  multiInfoContent: document.getElementById('multiInfoContent'),
   dailyAdviceWidget: document.getElementById('dailyAdviceWidget'),
   dailyAdviceMessage: document.getElementById('dailyAdviceMessage'),
   dailyAdviceAuthor: document.getElementById('dailyAdviceAuthor'),
+  dailyAdviceAuthorName: document.getElementById('dailyAdviceAuthorName'),
+  dailyAdviceAuthorProfile: document.getElementById('dailyAdviceAuthorProfile'),
   weatherUpdateStatus: document.getElementById('weatherUpdateStatus'),
   zoomStatus: document.getElementById('zoomStatus'),
   sidebarResizer: document.getElementById('sidebarResizer'),
@@ -160,15 +136,18 @@ const els = {
   slideVideo: document.getElementById('slideVideo'),
   slideCaption: document.getElementById('slideCaption'),
 
+  btnWindowMinimize: document.getElementById('btnWindowMinimize'),
+  btnWindowMaximize: document.getElementById('btnWindowMaximize'),
+  btnWindowClose: document.getElementById('btnWindowClose'),
   btnFullscreen: document.getElementById('btnFullscreen'),
   btnSidebarSettings: document.getElementById('btnSidebarSettings'),
   btnFileManager: document.getElementById('btnFileManager'),
   btnScreenSettings: document.getElementById('btnScreenSettings'),
-  btnExit: document.getElementById('btnExit'),
 
   filePanel: document.getElementById('filePanel'),
   btnAddFiles: document.getElementById('btnAddFiles'),
   btnCheckMissing: document.getElementById('btnCheckMissing'),
+  btnResetAppDefaults: document.getElementById('btnResetAppDefaults'),
   btnCloseFilePanel: document.getElementById('btnCloseFilePanel'),
   playlistTBody: document.querySelector('#playlistTable tbody'),
 
@@ -180,9 +159,14 @@ const els = {
   timetableLastUpdated: document.getElementById('timetableLastUpdated'),
   timetableErrorLog: document.getElementById('timetableErrorLog'),
   btnSaveSidebarSettings: document.getElementById('btnSaveSidebarSettings'),
+  btnResetSidebarDefaults: document.getElementById('btnResetSidebarDefaults'),
   btnCloseSidebarPanel: document.getElementById('btnCloseSidebarPanel'),
   inputLogoPath: null,
   btnPickLogoFile: null,
+  checkMultiSolarTerm: null,
+  checkMultiDailyAdvice: null,
+  selectMultiTransition: null,
+  inputMultiInterval: null,
   sidebarWidgetOrderList: null,
   sidebarWidgetCheckboxes: new Map(),
 
@@ -195,7 +179,6 @@ const els = {
   selectSplitRatio: document.getElementById('selectSplitRatio'),
   selectTransition: document.getElementById('selectTransition'),
   checkSwap: document.getElementById('checkSwap'),
-  checkVideoFirst: document.getElementById('checkVideoFirst'),
   checkAlwaysOnTop: document.getElementById('checkAlwaysOnTop'),
   checkPreventMin: document.getElementById('checkPreventMin'),
   inputSidebarWidth: document.getElementById('inputSidebarWidth'),
@@ -212,6 +195,7 @@ function deepClone(obj) {
 function normalizeForSave(config) {
   const clone = deepClone(config);
   delete clone.header;
+  const playerConfig = clone.player || {};
   clone.browser = {
     url: normalizeUrl(clone.browser?.url),
     popupMode: ['block', 'allow', 'current'].includes(clone.browser?.popupMode) ? clone.browser.popupMode : defaultConfig.browser.popupMode,
@@ -225,14 +209,18 @@ function normalizeForSave(config) {
     width: clampSidebarWidth(clone.sidebar?.width),
     logoPath: normalizeLogoPath(clone.sidebar?.logoPath),
     widgetDefaultsVersion: SIDEBAR_WIDGET_DEFAULTS_VERSION,
-    widgets: normalizeSidebarWidgets(clone.sidebar?.widgets, clone.sidebar?.widgetDefaultsVersion),
+    widgets: normalizeSidebarWidgets(clone.sidebar?.widgets),
+    multiWidget: normalizeMultiWidgetSettings(clone.sidebar?.multiWidget),
     timetable: normalizeTimetableSettings(clone.sidebar?.timetable)
   };
-  clone.player.playlist = (clone.player.playlist || []).map((item) => ({
-    path: item.path,
-    type: item.type,
-    duration: Number(item.duration) > 0 ? Number(item.duration) : 5
-  }));
+  clone.player = {
+    transition: normalizeTransition(playerConfig.transition),
+    playlist: (Array.isArray(playerConfig.playlist) ? playerConfig.playlist : []).map((item) => ({
+      path: item.path,
+      type: item.type,
+      duration: Number(item.duration) > 0 ? Number(item.duration) : 5
+    }))
+  };
   return clone;
 }
 
@@ -254,13 +242,43 @@ function pathToFileUrl(filePath) {
   return encodeURI(`file:///${normalized}`);
 }
 
+function getRuntimeBaseFromDefaultLogo() {
+  const logoPath = String(defaultConfig.sidebar?.logoPath || '').replace(/\\/g, '/');
+  const defaultRelativePath = DEFAULT_LOGO_RELATIVE_PATH.replace(/\\/g, '/');
+  if (!logoPath.toLowerCase().endsWith(defaultRelativePath.toLowerCase())) {
+    return '';
+  }
+  return logoPath.slice(0, -defaultRelativePath.length).replace(/[\\/]$/, '');
+}
+
+function resolveRuntimeRelativeLogoPath(value) {
+  const basePath = getRuntimeBaseFromDefaultLogo();
+  if (!basePath) {
+    return value;
+  }
+  const relativePath = String(value || '').replace(/^[\\/]+/, '').replace(/\\/g, '/');
+  return `${basePath}/${relativePath}`;
+}
+
 function normalizeLogoPath(value) {
   if (typeof value !== 'string') {
     return defaultConfig.sidebar.logoPath;
   }
 
   const trimmed = value.trim();
-  return trimmed || defaultConfig.sidebar.logoPath;
+  if (!trimmed) {
+    return defaultConfig.sidebar.logoPath;
+  }
+
+  if (/^[\\/](?![\\/])/.test(trimmed)) {
+    return resolveRuntimeRelativeLogoPath(trimmed);
+  }
+
+  return trimmed;
+}
+
+function normalizeTransition(value) {
+  return ['none', 'fade', 'slide'].includes(value) ? value : defaultConfig.player.transition;
 }
 
 function logoPathToSrc(value) {
@@ -309,22 +327,32 @@ function normalizeTimetableSettings(input) {
   };
 }
 
-function sameWidgetOrder(left, right) {
-  return left.length === right.length && left.every((id, index) => id === right[index]);
+function normalizeMultiWidgetSettings(input) {
+  const defaults = defaultConfig.sidebar.multiWidget || {
+    enabledItems: ['solarTerm', 'dailyAdvice'],
+    transition: 'slide',
+    intervalSeconds: 10
+  };
+  const allowedItems = new Set(['solarTerm', 'dailyAdvice']);
+  const sourceItems = Array.isArray(input?.enabledItems) ? input.enabledItems : defaults.enabledItems;
+  const enabledItems = sourceItems.filter((item) => allowedItems.has(item));
+  const numericInterval = Number.parseInt(input?.intervalSeconds, 10);
+
+  return {
+    enabledItems,
+    transition: ['none', 'fade', 'slide'].includes(input?.transition) ? input.transition : defaults.transition,
+    intervalSeconds: Number.isFinite(numericInterval)
+      ? Math.min(60, Math.max(5, numericInterval))
+      : defaults.intervalSeconds
+  };
 }
 
-function normalizeSidebarWidgets(input, widgetDefaultsVersion = SIDEBAR_WIDGET_DEFAULTS_VERSION) {
+function normalizeSidebarWidgets(input) {
   const defaultsById = new Map(defaultSidebarWidgets.map((widget) => [widget.id, widget]));
   const defaultIndexById = new Map(defaultSidebarWidgets.map((widget, index) => [widget.id, index]));
   const result = [];
   const seen = new Set();
   const source = Array.isArray(input) ? input : [];
-  const shouldApplyNewDefaults = Number(widgetDefaultsVersion) !== SIDEBAR_WIDGET_DEFAULTS_VERSION;
-  const sourceOrder = source
-    .map((item) => item?.id)
-    .filter((id) => defaultsById.has(id));
-  const shouldMigrateDefaultOrder = shouldApplyNewDefaults
-    && legacyDefaultSidebarWidgetOrders.some((order) => sameWidgetOrder(sourceOrder, order));
 
   const insertByDefaultOrder = (widget) => {
     const targetIndex = defaultIndexById.get(widget.id) ?? defaultSidebarWidgets.length;
@@ -344,7 +372,7 @@ function normalizeSidebarWidgets(input, widgetDefaultsVersion = SIDEBAR_WIDGET_D
     seen.add(defaults.id);
     result.push({
       ...defaults,
-      visible: shouldApplyNewDefaults && defaults.id === 'trainSchedule' ? false : item.visible !== false
+      visible: item.visible !== false
     });
   });
 
@@ -354,22 +382,20 @@ function normalizeSidebarWidgets(input, widgetDefaultsVersion = SIDEBAR_WIDGET_D
     }
   });
 
-  if (shouldMigrateDefaultOrder) {
-    result.sort((a, b) => (defaultIndexById.get(a.id) ?? defaultSidebarWidgets.length) - (defaultIndexById.get(b.id) ?? defaultSidebarWidgets.length));
-  }
-
-  const trainIndex = result.findIndex((widget) => widget.id === 'trainSchedule');
-  if (trainIndex >= 0 && result[trainIndex].visible === false) {
-    const [trainWidget] = result.splice(trainIndex, 1);
-    result.push(trainWidget);
-  }
-
   return result;
 }
 
 function isSidebarWidgetVisible(widgetId) {
   const widgets = normalizeSidebarWidgets(state.draftConfig?.sidebar?.widgets);
   return widgets.find((widget) => widget.id === widgetId)?.visible !== false;
+}
+
+function isSidebarWidgetRuntimeHidden(widgetId) {
+  return widgetId === 'weather' && state.weatherLoadFailed;
+}
+
+function isSidebarWidgetShown(widgetId) {
+  return isSidebarWidgetVisible(widgetId) && !isSidebarWidgetRuntimeHidden(widgetId);
 }
 
 function normalizeUrl(rawUrl) {
@@ -414,12 +440,92 @@ function isSeoulMetroTrainInfoUrl(rawUrl) {
   }
 }
 
+function isSmssHostUrl(rawUrl) {
+  try {
+    return new URL(normalizeUrl(rawUrl)).hostname === 'smss.seoulmetro.co.kr';
+  } catch (_) {
+    return false;
+  }
+}
+
+function getBrowserViewCurrentUrl() {
+  if (!els.browserView) {
+    return '';
+  }
+
+  try {
+    if (typeof els.browserView.getURL === 'function') {
+      const url = els.browserView.getURL();
+      if (url) {
+        return url;
+      }
+    }
+  } catch (_) {
+    // Webview URL may be unavailable before initialization.
+  }
+
+  return els.browserView.getAttribute('src') || '';
+}
+
+function shouldLogSmssLayoutState(extraUrl = '') {
+  return [
+    extraUrl,
+    state.draftConfig?.browser?.url,
+    state.browserRequestedUrl,
+    getBrowserViewCurrentUrl(),
+    els.inputUrl?.value
+  ].some(isSmssHostUrl);
+}
+
+function getElementLayoutSnapshot(element) {
+  if (!element) {
+    return null;
+  }
+
+  const style = window.getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return {
+    display: style.display,
+    visibility: style.visibility,
+    opacity: style.opacity,
+    transform: style.transform,
+    className: element.className || '',
+    rect: {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    }
+  };
+}
+
+function logSmssLayoutState(event, extra = {}) {
+  if (!shouldLogSmssLayoutState(extra.url)) {
+    return;
+  }
+
+  console.log(`[SMSS VIEW] ${JSON.stringify({
+    event,
+    time: new Date().toISOString(),
+    requestedUrl: state.browserRequestedUrl,
+    configuredUrl: state.draftConfig?.browser?.url || '',
+    webviewUrl: getBrowserViewCurrentUrl(),
+    isFullscreen: state.isFullscreen,
+    body: getElementLayoutSnapshot(document.body),
+    splitRoot: getElementLayoutSnapshot(els.splitRoot),
+    panelBrowser: getElementLayoutSnapshot(document.getElementById('panelBrowser')),
+    browserView: getElementLayoutSnapshot(els.browserView),
+    ...extra
+  })}`);
+}
+
 function resetAutoLine4Activation(url) {
   clearTimeout(state.autoLine4Timer);
   state.autoLine4Timer = null;
   state.autoLine4Attempts = 0;
   state.autoLine4Triggered = false;
   state.autoLine4TargetUrl = isSeoulMetroTrainInfoUrl(url) ? normalizeUrl(url) : '';
+  state.pendingLine4ZoomInClicks = state.autoLine4TargetUrl ? 2 : 0;
 }
 
 function getBrowserPopupMode() {
@@ -444,6 +550,8 @@ function loadBrowserUrlInWebview(rawUrl) {
   if (!els.browserView) {
     return url;
   }
+
+  logSmssLayoutState('load-url-request', { url });
 
   const currentUrl = normalizeUrl(
     (typeof els.browserView.getURL === 'function' && els.browserView.getURL())
@@ -577,6 +685,10 @@ function clearSlideTimer() {
   }
 }
 
+function getSlideKey(item) {
+  return item ? `${item.type}:${item.path}` : '';
+}
+
 function applyTransitionClass(element) {
   element.classList.remove('anim-fade', 'anim-slide');
   if (state.draftConfig.player.transition === 'fade') {
@@ -596,6 +708,7 @@ function hideMediaElements() {
   els.slideVideo.pause();
   els.slideVideo.removeAttribute('src');
   els.slideVideo.load();
+  state.activeSlideKey = '';
 }
 
 function showEmptyState() {
@@ -611,7 +724,8 @@ function scheduleNext(ms) {
   }, ms);
 }
 
-function showSlide(index) {
+function showSlide(index, options = {}) {
+  const { force = false } = options;
   const list = state.draftConfig.player.playlist;
   if (!list.length) {
     showEmptyState();
@@ -626,6 +740,24 @@ function showSlide(index) {
 
   state.currentIndex = playableIndex;
   const item = list[playableIndex];
+  const slideKey = getSlideKey(item);
+  const alreadyActive = state.activeSlideKey === slideKey
+    && ((item.type === 'image' && els.slideImage.classList.contains('active'))
+      || (item.type === 'video' && els.slideVideo.classList.contains('active')));
+
+  if (!force && alreadyActive) {
+    els.slideCaption.textContent = `${getFilename(item.path)} (${item.type})`;
+    if (item.type === 'image' && !state.isPaused && !state.slideTimer) {
+      const durationMs = Math.max(1, Number(item.duration) || 5) * 1000;
+      scheduleNext(durationMs);
+    }
+    if (item.type === 'video' && !state.isPaused && els.slideVideo.paused) {
+      els.slideVideo.play().catch(() => {
+        nextSlide();
+      });
+    }
+    return;
+  }
 
   hideMediaElements();
   els.emptyState.style.display = 'none';
@@ -634,6 +766,7 @@ function showSlide(index) {
   if (item.type === 'image') {
     els.slideImage.src = pathToFileUrl(item.path);
     els.slideImage.classList.add('active');
+    state.activeSlideKey = slideKey;
     applyTransitionClass(els.slideImage);
 
     if (!state.isPaused) {
@@ -645,9 +778,8 @@ function showSlide(index) {
 
   els.slideVideo.src = pathToFileUrl(item.path);
   els.slideVideo.classList.add('active');
+  state.activeSlideKey = slideKey;
   applyTransitionClass(els.slideVideo);
-
-  const shouldWaitEnded = !!state.draftConfig.player.videoFirstMode;
 
   els.slideVideo.onended = () => {
     if (state.isPaused) {
@@ -660,11 +792,6 @@ function showSlide(index) {
     // Invalid or unsupported file: skip immediately.
     nextSlide();
   });
-
-  if (!state.isPaused && !shouldWaitEnded) {
-    const durationMs = Math.max(1, Number(item.duration) || 5) * 1000;
-    scheduleNext(durationMs);
-  }
 }
 
 function nextSlide() {
@@ -675,7 +802,7 @@ function nextSlide() {
     return;
   }
   const nextIndex = (state.currentIndex + 1) % list.length;
-  showSlide(nextIndex);
+  showSlide(nextIndex, { force: true });
 }
 
 async function refreshMissingFlags() {
@@ -792,6 +919,137 @@ async function activateLine4InBrowser() {
   }
 }
 
+async function clickSmssZoomIn(times = 2) {
+  if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
+    return false;
+  }
+
+  const clickCount = Math.min(5, Math.max(0, Number.parseInt(times, 10) || 0));
+  if (!clickCount) {
+    return true;
+  }
+
+  const script = `
+    (() => new Promise((resolve) => {
+      const clickZoom = (attempt = 0) => {
+        const zoomIn = document.querySelector('#zoomIn');
+        if (!zoomIn) {
+          if (attempt < 12) {
+            setTimeout(() => clickZoom(attempt + 1), 150);
+            return;
+          }
+          resolve('missing');
+          return;
+        }
+
+        let count = 0;
+        const clickOnce = () => {
+          if (typeof zoomIn.click === 'function') {
+            zoomIn.click();
+          } else {
+            zoomIn.dispatchEvent(new MouseEvent('click', {
+              bubbles: true,
+              cancelable: true,
+              view: window
+            }));
+          }
+          count += 1;
+          if (count >= ${clickCount}) {
+            resolve('clicked');
+            return;
+          }
+          setTimeout(clickOnce, 180);
+        };
+
+        clickOnce();
+      };
+
+      clickZoom();
+    }))();
+  `;
+
+  try {
+    const result = await els.browserView.executeJavaScript(script, false);
+    return result === 'clicked';
+  } catch (_) {
+    return false;
+  }
+}
+
+function getLine4RefreshTargetUrl() {
+  const configuredUrl = normalizeUrl(state.draftConfig?.browser?.url || SEOUL_METRO_TRAIN_INFO_URL);
+  if (isSeoulMetroTrainInfoUrl(configuredUrl)) {
+    return configuredUrl;
+  }
+
+  const currentUrl = normalizeUrl(getBrowserViewCurrentUrl() || '');
+  if (isSeoulMetroTrainInfoUrl(currentUrl)) {
+    return currentUrl;
+  }
+
+  return SEOUL_METRO_TRAIN_INFO_URL;
+}
+
+async function refreshBrowserAndActivateLine4() {
+  if (!els.browserView) {
+    return false;
+  }
+
+  const targetUrl = getLine4RefreshTargetUrl();
+  resetAutoLine4Activation(targetUrl);
+  state.browserRequestedUrl = targetUrl;
+  logSmssLayoutState('manual-refresh-line4-request', { url: targetUrl });
+
+  const currentUrl = normalizeUrl(getBrowserViewCurrentUrl() || 'about:blank');
+
+  try {
+    if (currentUrl !== targetUrl) {
+      if (typeof els.browserView.loadURL === 'function') {
+        const loadPromise = els.browserView.loadURL(targetUrl);
+        if (loadPromise && typeof loadPromise.catch === 'function') {
+          loadPromise.catch((err) => {
+            if (err?.code !== 'ERR_ABORTED') {
+              console.warn('Webview refresh failed:', err);
+            }
+          });
+        }
+        return true;
+      }
+
+      els.browserView.setAttribute('src', targetUrl);
+      return true;
+    }
+
+    if (typeof els.browserView.reloadIgnoringCache === 'function') {
+      els.browserView.reloadIgnoringCache();
+      return true;
+    }
+
+    if (typeof els.browserView.reload === 'function') {
+      els.browserView.reload();
+      return true;
+    }
+
+    if (typeof els.browserView.loadURL === 'function') {
+      const loadPromise = els.browserView.loadURL(targetUrl);
+      if (loadPromise && typeof loadPromise.catch === 'function') {
+        loadPromise.catch((err) => {
+          if (err?.code !== 'ERR_ABORTED') {
+            console.warn('Webview refresh failed:', err);
+          }
+        });
+      }
+      return true;
+    }
+
+    els.browserView.setAttribute('src', targetUrl);
+    return true;
+  } catch (err) {
+    console.warn('Webview refresh failed:', err);
+    return false;
+  }
+}
+
 function scheduleAutoActivateLine4(delay = 700) {
   if (!state.autoLine4TargetUrl || state.autoLine4Triggered) {
     return;
@@ -806,6 +1064,11 @@ function scheduleAutoActivateLine4(delay = 700) {
     state.autoLine4Attempts += 1;
     const activated = await activateLine4InBrowser();
     if (activated) {
+      const zoomInClicks = state.pendingLine4ZoomInClicks;
+      state.pendingLine4ZoomInClicks = 0;
+      if (zoomInClicks > 0) {
+        await clickSmssZoomIn(zoomInClicks);
+      }
       state.autoLine4Triggered = true;
       clearTimeout(state.autoLine4Timer);
       state.autoLine4Timer = null;
@@ -881,6 +1144,10 @@ function ensureSidebarWidgetStructure() {
     els.solarTermWidget.dataset.sidebarWidget = 'solarTerm';
   }
 
+  if (els.multiInfoWidget) {
+    els.multiInfoWidget.dataset.sidebarWidget = 'multiInfo';
+  }
+
   if (els.dailyAdviceWidget) {
     els.dailyAdviceWidget.dataset.sidebarWidget = 'dailyAdvice';
   }
@@ -927,6 +1194,7 @@ function applySidebarWidgets() {
       return;
     }
     element.classList.toggle('widget-disabled', widget.visible === false);
+    element.classList.toggle('widget-runtime-hidden', isSidebarWidgetRuntimeHidden(widget.id));
     els.fullscreenSidebar.insertBefore(element, resizer || null);
   });
 
@@ -1023,7 +1291,7 @@ function setupSidebarSettingsPanel() {
   const logoPathInput = document.createElement('input');
   logoPathInput.id = 'inputLogoPath';
   logoPathInput.type = 'text';
-  logoPathInput.placeholder = 'files/ncuc_logo.png';
+  logoPathInput.placeholder = '\\files\\logos\\ncuc_logo.png';
   const logoPickButton = document.createElement('button');
   logoPickButton.id = 'btnPickLogoFile';
   logoPickButton.type = 'button';
@@ -1046,6 +1314,62 @@ function setupSidebarSettingsPanel() {
   const datetimeSection = createSettingsSection('날짜/시간 설정');
   datetimeSection.append(createSidebarWidgetCheckbox('datetime', '날짜/시간 위젯 표시'));
 
+  const multiSection = createSettingsSection('멀티 위젯 설정');
+  multiSection.append(createSidebarWidgetCheckbox('multiInfo', '멀티 위젯 표시'));
+  const multiOptions = document.createElement('div');
+  multiOptions.className = 'widget-options';
+  multiOptions.dataset.widgetOptions = 'multiInfo';
+  const multiGrid = document.createElement('div');
+  multiGrid.className = 'form-grid';
+  const multiSolarLabel = document.createElement('label');
+  multiSolarLabel.className = 'checkbox-row';
+  const multiSolarCheckbox = document.createElement('input');
+  multiSolarCheckbox.id = 'checkMultiSolarTerm';
+  multiSolarCheckbox.type = 'checkbox';
+  multiSolarLabel.append(multiSolarCheckbox, document.createElement('span'));
+  multiSolarLabel.querySelector('span').textContent = '24절기 포함';
+  const multiAdviceLabel = document.createElement('label');
+  multiAdviceLabel.className = 'checkbox-row';
+  const multiAdviceCheckbox = document.createElement('input');
+  multiAdviceCheckbox.id = 'checkMultiDailyAdvice';
+  multiAdviceCheckbox.type = 'checkbox';
+  multiAdviceLabel.append(multiAdviceCheckbox, document.createElement('span'));
+  multiAdviceLabel.querySelector('span').textContent = '오늘의 한마디 포함';
+  const multiTransitionLabel = document.createElement('label');
+  multiTransitionLabel.textContent = '전환 효과';
+  const multiTransitionSelect = document.createElement('select');
+  multiTransitionSelect.id = 'selectMultiTransition';
+  [
+    ['fade', 'Fade'],
+    ['slide', 'Slide'],
+    ['none', 'None']
+  ].forEach(([value, text]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    multiTransitionSelect.append(option);
+  });
+  multiTransitionLabel.append(multiTransitionSelect);
+  const multiIntervalLabel = document.createElement('label');
+  multiIntervalLabel.textContent = '순환 시간(초)';
+  const multiIntervalInput = document.createElement('input');
+  multiIntervalInput.id = 'inputMultiInterval';
+  multiIntervalInput.type = 'number';
+  multiIntervalInput.min = '5';
+  multiIntervalInput.max = '60';
+  multiIntervalInput.step = '1';
+  multiIntervalLabel.append(multiIntervalInput);
+  multiGrid.append(multiSolarLabel, multiAdviceLabel, multiTransitionLabel, multiIntervalLabel);
+  const multiNote = document.createElement('p');
+  multiNote.className = 'settings-note';
+  multiNote.textContent = '24절기와 오늘의 한마디를 한 칸에서 번갈아 표시합니다.';
+  multiOptions.append(multiGrid, multiNote);
+  multiSection.append(multiOptions);
+  els.checkMultiSolarTerm = multiSolarCheckbox;
+  els.checkMultiDailyAdvice = multiAdviceCheckbox;
+  els.selectMultiTransition = multiTransitionSelect;
+  els.inputMultiInterval = multiIntervalInput;
+
   const solarTermSection = createSettingsSection('24절기 설정');
   solarTermSection.append(createSidebarWidgetCheckbox('solarTerm', '24절기 위젯 표시'));
   const solarTermNote = document.createElement('p');
@@ -1054,13 +1378,23 @@ function setupSidebarSettingsPanel() {
   solarTermSection.append(solarTermNote);
   wrapWidgetOptions(solarTermSection, 'solarTerm');
 
+  const dailyAdviceSection = createSettingsSection('오늘의 한마디 설정');
+  dailyAdviceSection.append(createSidebarWidgetCheckbox('dailyAdvice', '오늘의 한마디 위젯 표시'));
+  const dailyAdviceNote = document.createElement('p');
+  dailyAdviceNote.className = 'settings-note';
+  dailyAdviceNote.textContent = '오늘의 한마디를 좌측 바에 독립 카드로 표시합니다.';
+  dailyAdviceSection.append(dailyAdviceNote);
+  wrapWidgetOptions(dailyAdviceSection, 'dailyAdvice');
+
   if (firstSection) {
     els.sidebarPanel.insertBefore(orderSection, firstSection);
     els.sidebarPanel.insertBefore(basicSection, firstSection);
     els.sidebarPanel.insertBefore(datetimeSection, firstSection);
+    els.sidebarPanel.insertBefore(multiSection, firstSection);
     els.sidebarPanel.insertBefore(solarTermSection, firstSection);
+    els.sidebarPanel.insertBefore(dailyAdviceSection, firstSection);
   } else if (title) {
-    title.after(orderSection, basicSection, datetimeSection, solarTermSection);
+    title.after(orderSection, basicSection, datetimeSection, multiSection, solarTermSection, dailyAdviceSection);
   }
 
   const sections = [...els.sidebarPanel.querySelectorAll('.settings-section')];
@@ -1068,6 +1402,9 @@ function setupSidebarSettingsPanel() {
   if (weatherSection && !weatherSection.querySelector('[data-sidebar-widget-checkbox="weather"]')) {
     weatherSection.querySelector('h3')?.after(createSidebarWidgetCheckbox('weather', '날씨 위젯 표시'));
     wrapWidgetOptions(weatherSection, 'weather');
+  }
+  if (weatherSection && multiSection.parentNode === els.sidebarPanel) {
+    els.sidebarPanel.insertBefore(weatherSection, multiSection);
   }
 
   const trainSection = sections.find((section) => section.querySelector('#selectTimetableDisplayFormat'));
@@ -1096,6 +1433,22 @@ function collectSidebarWidgetsFromControls() {
   });
 }
 
+function collectMultiWidgetSettingsFromControls() {
+  const enabledItems = [];
+  if (els.checkMultiSolarTerm?.checked) {
+    enabledItems.push('solarTerm');
+  }
+  if (els.checkMultiDailyAdvice?.checked) {
+    enabledItems.push('dailyAdvice');
+  }
+
+  return normalizeMultiWidgetSettings({
+    enabledItems,
+    transition: els.selectMultiTransition?.value,
+    intervalSeconds: els.inputMultiInterval?.value
+  });
+}
+
 function renderSidebarWidgetControls() {
   const widgets = normalizeSidebarWidgets(state.draftConfig?.sidebar?.widgets);
   widgets.forEach((widget) => {
@@ -1111,7 +1464,10 @@ function renderSidebarWidgetControls() {
   }
 
   els.sidebarWidgetOrderList.innerHTML = '';
-  widgets.forEach((widget, index) => {
+  widgets
+    .map((widget, index) => ({ widget, index }))
+    .filter(({ widget }) => widget.visible !== false && !isSidebarWidgetRuntimeHidden(widget.id))
+    .forEach(({ widget, index }) => {
     const item = document.createElement('div');
     item.className = 'sidebar-widget-order-item';
     item.draggable = true;
@@ -1119,7 +1475,6 @@ function renderSidebarWidgetControls() {
     item.innerHTML = `
       <span class="drag-handle" aria-hidden="true">≡</span>
       <span class="sidebar-widget-order-name">${widget.label}</span>
-      <span class="sidebar-widget-order-state">${widget.visible === false ? '숨김' : '표시'}</span>
     `;
 
     item.addEventListener('dragstart', () => {
@@ -1176,7 +1531,6 @@ function applySettingsToForm() {
   els.selectSplitRatio.value = state.draftConfig.layout.splitRatio;
   els.selectTransition.value = state.draftConfig.player.transition;
   els.checkSwap.checked = !!state.draftConfig.layout.panelSwapped;
-  els.checkVideoFirst.checked = !!state.draftConfig.player.videoFirstMode;
   els.checkAlwaysOnTop.checked = !!state.draftConfig.window.alwaysOnTop;
   els.checkPreventMin.checked = !!state.draftConfig.window.preventMinimize;
   if (els.inputSidebarWidth) {
@@ -1184,6 +1538,19 @@ function applySettingsToForm() {
   }
   if (els.inputLogoPath) {
     els.inputLogoPath.value = normalizeLogoPath(state.draftConfig.sidebar?.logoPath);
+  }
+  const multiWidgetSettings = normalizeMultiWidgetSettings(state.draftConfig.sidebar?.multiWidget);
+  if (els.checkMultiSolarTerm) {
+    els.checkMultiSolarTerm.checked = multiWidgetSettings.enabledItems.includes('solarTerm');
+  }
+  if (els.checkMultiDailyAdvice) {
+    els.checkMultiDailyAdvice.checked = multiWidgetSettings.enabledItems.includes('dailyAdvice');
+  }
+  if (els.selectMultiTransition) {
+    els.selectMultiTransition.value = multiWidgetSettings.transition;
+  }
+  if (els.inputMultiInterval) {
+    els.inputMultiInterval.value = multiWidgetSettings.intervalSeconds;
   }
   const timetableSettings = normalizeTimetableSettings(state.draftConfig.sidebar?.timetable);
   if (els.selectTrainStation) {
@@ -1265,6 +1632,17 @@ function updateStationDisplayName() {
   if (els.sidebarStationName) {
     els.sidebarStationName.textContent = getCurrentStationDisplayName();
   }
+}
+
+function setWeatherWidgetLoadFailed(loadFailed) {
+  const nextValue = !!loadFailed;
+  if (state.weatherLoadFailed === nextValue) {
+    return;
+  }
+
+  state.weatherLoadFailed = nextValue;
+  getSidebarWidgetElement('weather')?.classList.toggle('widget-runtime-hidden', state.weatherLoadFailed);
+  renderSidebarWidgetControls();
 }
 
 function arrangeSidebarInfoCards() {
@@ -1417,9 +1795,21 @@ async function saveSettingsToDisk() {
   applySidebarWidgets();
   updateStationDisplayName();
   applyBrowserSettings();
+  applySettingsToForm();
   renderPlaylist();
   showSlide(state.currentIndex);
   updateBackgroundWidgetTasks();
+}
+
+function applyDraftConfigToUI({ firstSlide = false } = {}) {
+  applyLayout();
+  applySidebarWidth(state.draftConfig.sidebar?.width);
+  applySidebarLogo();
+  applyBrowserSettings();
+  applySettingsToForm();
+  updateBackgroundWidgetTasks();
+  renderPlaylist();
+  showSlide(firstSlide ? 0 : state.currentIndex);
 }
 
 function mergeUIState(oldConfig, newConfig) {
@@ -1448,12 +1838,12 @@ function mergeUIState(oldConfig, newConfig) {
       width: clampSidebarWidth(newConfig.sidebar?.width),
       logoPath: normalizeLogoPath(newConfig.sidebar?.logoPath),
       widgetDefaultsVersion: SIDEBAR_WIDGET_DEFAULTS_VERSION,
-      widgets: normalizeSidebarWidgets(newConfig.sidebar?.widgets, newConfig.sidebar?.widgetDefaultsVersion),
+      widgets: normalizeSidebarWidgets(newConfig.sidebar?.widgets),
+      multiWidget: normalizeMultiWidgetSettings(newConfig.sidebar?.multiWidget),
       timetable: normalizeTimetableSettings(newConfig.sidebar?.timetable)
     },
     player: {
-      ...deepClone(defaultConfig.player),
-      ...deepClone(newConfig.player),
+      transition: normalizeTransition(newConfig.player?.transition),
       playlist: listWithState
     }
   };
@@ -1471,8 +1861,7 @@ function bindSettingsForm() {
     state.draftConfig.layout.splitRatio = els.selectSplitRatio.value;
     state.draftConfig.layout.borderEnabled = false;
     state.draftConfig.layout.panelSwapped = els.checkSwap.checked;
-    state.draftConfig.player.transition = els.selectTransition.value;
-    state.draftConfig.player.videoFirstMode = els.checkVideoFirst.checked;
+    state.draftConfig.player.transition = normalizeTransition(els.selectTransition.value);
     state.draftConfig.window.alwaysOnTop = els.checkAlwaysOnTop.checked;
     state.draftConfig.window.preventMinimize = els.checkPreventMin.checked;
     state.draftConfig.sidebar = {
@@ -1505,7 +1894,6 @@ function bindSettingsForm() {
     els.selectSplitRatio,
     els.selectTransition,
     els.checkSwap,
-    els.checkVideoFirst,
     els.checkAlwaysOnTop,
     els.checkPreventMin,
     els.inputSidebarWidth,
@@ -1520,7 +1908,7 @@ function bindSettingsForm() {
 function bindToolbarAndPanels() {
   if (els.browserTitleWidget) {
     els.browserTitleWidget.addEventListener('click', () => {
-      activateLine4InBrowser();
+      refreshBrowserAndActivateLine4();
     });
 
     els.browserTitleWidget.addEventListener('keydown', (event) => {
@@ -1528,13 +1916,29 @@ function bindToolbarAndPanels() {
         return;
       }
       event.preventDefault();
-      activateLine4InBrowser();
+      refreshBrowserAndActivateLine4();
     });
   }
 
   els.btnFullscreen.addEventListener('click', async () => {
     state.isFullscreen = await window.desktopAPI.toggleFullscreen();
     updateToolbarVisibility();
+  });
+
+  els.btnWindowMinimize?.addEventListener('click', () => {
+    window.desktopAPI.minimizeWindow?.();
+  });
+
+  els.btnWindowMaximize?.addEventListener('click', async () => {
+    if (typeof window.desktopAPI.toggleMaximize === 'function') {
+      await window.desktopAPI.toggleMaximize();
+    }
+    state.isFullscreen = await window.desktopAPI.isFullscreen();
+    updateToolbarVisibility();
+  });
+
+  els.btnWindowClose?.addEventListener('click', () => {
+    window.desktopAPI.requestQuit();
   });
 
   els.btnSidebarSettings.addEventListener('click', () => {
@@ -1566,10 +1970,6 @@ function bindToolbarAndPanels() {
     await syncDraftState();
   });
 
-  els.btnExit.addEventListener('click', () => {
-    window.desktopAPI.requestQuit();
-  });
-
   els.btnCloseFilePanel.addEventListener('click', () => {
     setPanelVisible(els.filePanel, false);
   });
@@ -1581,6 +1981,24 @@ function bindToolbarAndPanels() {
   els.btnSaveSidebarSettings.addEventListener('click', async () => {
     await saveSettingsToDisk();
     setPanelVisible(els.sidebarPanel, false);
+  });
+
+  els.btnResetSidebarDefaults?.addEventListener('click', async () => {
+    const defaultSidebar = deepClone(defaultConfig.sidebar);
+    state.draftConfig.sidebar = {
+      ...defaultSidebar,
+      logoPath: normalizeLogoPath(defaultSidebar.logoPath),
+      widgets: normalizeSidebarWidgets(defaultSidebar.widgets),
+      multiWidget: normalizeMultiWidgetSettings(defaultSidebar.multiWidget),
+      timetable: normalizeTimetableSettings(defaultSidebar.timetable)
+    };
+    applySidebarWidth(state.draftConfig.sidebar.width);
+    applySidebarLogo();
+    applySidebarWidgets();
+    applySettingsToForm();
+    updateBackgroundWidgetTasks({ forceWeather: true });
+    renderTimetableSettingsStatus();
+    await syncDraftState();
   });
 
   els.btnRefreshTimetable.addEventListener('click', async () => {
@@ -1598,29 +2016,25 @@ function bindToolbarAndPanels() {
 
   els.btnCancelSettings.addEventListener('click', async () => {
     state.draftConfig = mergeUIState(state.draftConfig, deepClone(state.savedConfig));
-    applyLayout();
-    applySidebarWidth(state.draftConfig.sidebar?.width);
-    applySidebarLogo();
-    applyBrowserSettings();
-    applySettingsToForm();
-    updateBackgroundWidgetTasks();
-    renderPlaylist();
-    showSlide(state.currentIndex);
+    applyDraftConfigToUI();
     await syncDraftState();
     setPanelVisible(els.settingsPanel, false);
   });
 
   els.btnResetDefaults.addEventListener('click', async () => {
     state.draftConfig = mergeUIState(state.draftConfig, deepClone(defaultConfig));
-    applyLayout();
-    applySidebarWidth(state.draftConfig.sidebar?.width);
-    applySidebarLogo();
-    applyBrowserSettings();
-    applySettingsToForm();
-    updateBackgroundWidgetTasks();
-    renderPlaylist();
-    showSlide(0);
+    applyDraftConfigToUI({ firstSlide: true });
     await syncDraftState();
+  });
+
+  els.btnResetAppDefaults?.addEventListener('click', async () => {
+    const ok = window.confirm('앱 전체 설정을 기본값으로 초기화할까요? 화면 설정, 좌측 바 설정, 재생 목록이 모두 기본값으로 저장됩니다.');
+    if (!ok) {
+      return;
+    }
+    state.currentIndex = 0;
+    state.draftConfig = mergeUIState(state.draftConfig, deepClone(defaultConfig));
+    await saveSettingsToDisk();
   });
 
   els.btnAddFiles.addEventListener('click', async () => {
@@ -1700,6 +2114,7 @@ function updateSidebarSettingsFromForm() {
     widgetDefaultsVersion: SIDEBAR_WIDGET_DEFAULTS_VERSION,
     width: clampSidebarWidth(els.inputSidebarWidth?.value),
     widgets: collectSidebarWidgetsFromControls(),
+    multiWidget: collectMultiWidgetSettingsFromControls(),
     timetable: normalizeTimetableSettings({
       ...station,
       direction: els.selectTrainDirection?.value,
@@ -1724,6 +2139,10 @@ function bindSidebarSettingsForm() {
     els.selectTrainDirection,
     els.selectTimetableDisplayFormat,
     els.inputSidebarWidth,
+    els.checkMultiSolarTerm,
+    els.checkMultiDailyAdvice,
+    els.selectMultiTransition,
+    els.inputMultiInterval,
     ...els.sidebarWidgetCheckboxes.values()
   ].forEach((input) => {
     if (!input) return;
@@ -1794,18 +2213,54 @@ function bindWebviewPopupHandling() {
     });
   }
 
+  els.browserView.addEventListener('did-start-loading', () => {
+    logSmssLayoutState('webview-did-start-loading');
+  });
+
+  els.browserView.addEventListener('did-start-navigation', (event) => {
+    logSmssLayoutState('webview-did-start-navigation', {
+      url: event.url,
+      isMainFrame: event.isMainFrame,
+      isInPlace: event.isInPlace
+    });
+  });
+
+  els.browserView.addEventListener('did-navigate', (event) => {
+    logSmssLayoutState('webview-did-navigate', {
+      url: event.url,
+      httpResponseCode: event.httpResponseCode,
+      httpStatusText: event.httpStatusText
+    });
+  });
+
+  els.browserView.addEventListener('did-fail-load', (event) => {
+    logSmssLayoutState('webview-did-fail-load', {
+      errorCode: event.errorCode,
+      errorDescription: event.errorDescription,
+      validatedURL: event.validatedURL,
+      isMainFrame: event.isMainFrame
+    });
+  });
+
+  els.browserView.addEventListener('console-message', (event) => {
+    updateSmssAliveStatusFromConsoleMessage(event.message);
+  });
+
   els.browserView.addEventListener('dom-ready', () => {
+    logSmssLayoutState('webview-dom-ready');
     syncWebviewPopupPermission();
     applyBrowserZoom();
     suppressInPagePopups();
   }, { once: true });
 
   els.browserView.addEventListener('did-finish-load', () => {
+    logSmssLayoutState('webview-did-finish-load');
     suppressInPagePopups();
     scheduleAutoActivateLine4(900);
   });
 
   els.browserView.addEventListener('did-stop-loading', () => {
+    logSmssLayoutState('webview-did-stop-loading');
     suppressInPagePopups();
     scheduleAutoActivateLine4(900);
   });
@@ -1840,12 +2295,22 @@ function updateToolbarVisibility() {
   els.toolbar.classList.remove('hidden');
   els.splitRoot.classList.toggle('fullscreen', state.isFullscreen);
   document.body.classList.toggle('fullscreen-active', state.isFullscreen);
+  if (!state.isFullscreen) {
+    document.body.classList.remove('ui-idle');
+    clearTimeout(state.uiIdleTimer);
+  }
+  if (state.smssLayoutFullscreenState !== state.isFullscreen) {
+    state.smssLayoutFullscreenState = state.isFullscreen;
+    logSmssLayoutState('fullscreen-state-changed', {
+      isFullscreen: state.isFullscreen
+    });
+  }
   updateFullscreenButtonText();
 }
 
 function updateFullscreenButtonText() {
   if (els.btnFullscreen) {
-    els.btnFullscreen.textContent = state.isFullscreen ? '전체화면 종료' : '전체화면 시작';
+    els.btnFullscreen.textContent = state.isFullscreen ? '현시 모드 종료' : '현시 모드 시작';
   }
 }
 
@@ -1861,7 +2326,7 @@ function markUserActive() {
   document.body.classList.remove('ui-idle');
   clearTimeout(state.uiIdleTimer);
 
-  if (shouldHoldUiVisible()) {
+  if (!state.isFullscreen || shouldHoldUiVisible()) {
     return;
   }
 
@@ -1872,10 +2337,24 @@ function markUserActive() {
   }, 5000);
 }
 
+function markBrowserTitleHintActive() {
+  if (!els.browserTitleWidget) {
+    return;
+  }
+
+  document.body.classList.add('show-browser-title-hint');
+  clearTimeout(state.browserTitleHintTimer);
+  state.browserTitleHintTimer = setTimeout(() => {
+    document.body.classList.remove('show-browser-title-hint');
+  }, 5000);
+}
+
 function bindActivityVisibility() {
   ['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart'].forEach((eventName) => {
     window.addEventListener(eventName, markUserActive, { passive: true });
   });
+  window.addEventListener('mousemove', markBrowserTitleHintActive, { passive: true });
+  window.addEventListener('mousedown', markBrowserTitleHintActive, { passive: true });
   markUserActive();
 }
 
@@ -1890,6 +2369,8 @@ function bindFullscreenInteractions() {
   });
 
   window.addEventListener('resize', async () => {
+    refitDailyAdviceLayout();
+    fitMultiInfoAdviceLayout();
     if (typeof window.desktopAPI.isFullscreen !== 'function') {
       return;
     }
@@ -1958,6 +2439,17 @@ function formatHourMinute(value) {
   }
   const date = new Date(value);
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function formatHourMinuteSecond(value) {
+  if (!value) {
+    return '--:--:--';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '--:--:--';
+  }
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
 }
 
 function formatDateTime(value) {
@@ -2272,14 +2764,25 @@ function updateStatusToast() {
     return;
   }
 
-  const weatherPart = state.weatherLastUpdatedAt
-    ? `날씨 갱신 완료 ${formatHourMinute(state.weatherLastUpdatedAt)}`
-    : '날씨 업데이트 대기 중';
-  const stationCache = getSelectedStationCache();
-  const timetablePart = stationCache?.updatedAt
-    ? `시간표 갱신 ${formatHourMinute(stationCache.updatedAt)}`
-    : '시간표 갱신 없음';
-  els.weatherUpdateStatus.textContent = `${weatherPart} / ${timetablePart}`;
+  const parts = [];
+  if (isSidebarWidgetShown('weather')) {
+    parts.push(state.weatherLastUpdatedAt
+      ? `날씨 갱신 (${formatHourMinute(state.weatherLastUpdatedAt)})`
+      : '날씨 갱신 대기 중');
+  }
+
+  if (state.smssLastAliveAt) {
+    parts.push(`웹 alive (${formatHourMinuteSecond(state.smssLastAliveAt)})`);
+  }
+
+  if (isSidebarWidgetVisible('trainSchedule')) {
+    const stationCache = getSelectedStationCache();
+    parts.push(stationCache?.updatedAt
+      ? `시간표 갱신 (${formatHourMinute(stationCache.updatedAt)})`
+      : '시간표 갱신 없음');
+  }
+
+  els.weatherUpdateStatus.textContent = parts.join(' / ');
 }
 
 function showStatusOverride(message) {
@@ -2290,6 +2793,28 @@ function showStatusOverride(message) {
   els.weatherUpdateStatus.textContent = message;
   markUserActive();
   state.statusOverrideTimer = setTimeout(updateStatusToast, 6000);
+}
+
+function updateSmssAliveStatusFromConsoleMessage(message) {
+  const text = String(message || '');
+  const prefixMatch = text.match(/^\[SMSS INPAGE\]\s+(\{.*\})$/);
+  if (prefixMatch) {
+    try {
+      const payload = JSON.parse(prefixMatch[1]);
+      if (payload?.event === 'alive') {
+        state.smssLastAliveAt = payload.time || new Date().toISOString();
+        updateStatusToast();
+      }
+    } catch (_) {
+      // Ignore malformed diagnostic console payloads.
+    }
+    return;
+  }
+
+  if (/^alive\s+.+https:\/\/smss\.seoulmetro\.co\.kr\//.test(text)) {
+    state.smssLastAliveAt = new Date().toISOString();
+    updateStatusToast();
+  }
 }
 
 async function refreshTimetableManually() {
@@ -2308,7 +2833,7 @@ async function refreshTimetableManually() {
     if (result.ok) {
       state.timetableRefreshFailed = false;
       state.timetableRuntimeErrors = [];
-      showStatusOverride(`시간표 갱신 완료 ${formatHourMinute(new Date())}`);
+      showStatusOverride(`시간표 갱신 (${formatHourMinute(new Date())})`);
     } else {
       state.timetableRefreshFailed = true;
       addTimetableRuntimeError('시간표 갱신 요청 실패', result.error || '설정에서 오류 확인');
@@ -2320,6 +2845,202 @@ async function refreshTimetableManually() {
     els.btnRefreshTimetable.disabled = false;
     els.btnRefreshTimetable.textContent = originalText;
   }
+}
+
+function getMultiWidgetSettings() {
+  return normalizeMultiWidgetSettings(state.draftConfig?.sidebar?.multiWidget);
+}
+
+function isMultiInfoWidgetEnabled() {
+  return isSidebarWidgetVisible('multiInfo');
+}
+
+function isMultiWidgetItemEnabled(itemId) {
+  return isMultiInfoWidgetEnabled() && getMultiWidgetSettings().enabledItems.includes(itemId);
+}
+
+function shouldUseSolarTermData() {
+  return isSidebarWidgetVisible('solarTerm') || isMultiWidgetItemEnabled('solarTerm');
+}
+
+function shouldUseDailyAdviceData() {
+  return isSidebarWidgetVisible('dailyAdvice') || isMultiWidgetItemEnabled('dailyAdvice');
+}
+
+function clearMultiInfoWidget() {
+  els.multiInfoWidget?.classList.add('hidden');
+  if (els.multiInfoContent) {
+    els.multiInfoContent.innerHTML = '';
+    els.multiInfoContent.className = 'multi-info-content';
+  }
+  state.multiInfoRenderKey = '';
+}
+
+function renderMultiSolarTermPane() {
+  const info = getSolarTermDisplayInfo();
+  const title = info?.title || '오늘의 절기';
+  const primary = info?.primary || '절기 정보 확인 중';
+  const dateText = info?.dateText || '';
+  const description = info?.description || '잠시 후 표시됩니다.';
+
+  return `
+    <div class="multi-info-pane multi-info-solar-pane" data-multi-pane="solarTerm">
+      <div class="multi-info-kicker">${escapeHtml(title)}</div>
+      <div class="multi-info-primary">${escapeHtml(primary)}</div>
+      ${dateText ? `<div class="multi-info-date">${escapeHtml(dateText)}</div>` : ''}
+      <div class="multi-info-description">${escapeHtml(description)}</div>
+    </div>
+  `;
+}
+
+function normalizeAdviceForDisplay(advice = fallbackDailyAdvice) {
+  const message = typeof advice.message === 'string' && advice.message.trim()
+    ? advice.message.trim()
+    : fallbackDailyAdvice.message;
+  return {
+    message,
+    author: typeof advice.author === 'string' ? advice.author.trim() : '',
+    authorProfile: typeof advice.authorProfile === 'string' ? advice.authorProfile.trim() : ''
+  };
+}
+
+function renderMultiDailyAdvicePane() {
+  const advice = normalizeAdviceForDisplay(state.dailyAdviceData || fallbackDailyAdvice);
+  const authorHtml = advice.author
+    ? `<div class="multi-info-advice-author">
+        <span class="multi-info-advice-author-name">${escapeHtml(advice.author)}</span>
+        ${advice.authorProfile ? `<span class="multi-info-advice-author-profile">${escapeHtml(advice.authorProfile)}</span>` : ''}
+      </div>`
+    : '';
+
+  return `
+    <div class="multi-info-pane multi-info-advice-pane" data-multi-pane="dailyAdvice">
+      <div class="multi-info-kicker">오늘의 한마디</div>
+      <div class="multi-info-advice-message">${escapeHtml(advice.message)}</div>
+      ${authorHtml}
+    </div>
+  `;
+}
+
+function getMultiInfoPanes() {
+  if (!isMultiInfoWidgetEnabled()) {
+    return [];
+  }
+
+  return getMultiWidgetSettings().enabledItems
+    .map((itemId) => {
+      if (itemId === 'solarTerm') {
+        return { id: itemId, html: renderMultiSolarTermPane() };
+      }
+      if (itemId === 'dailyAdvice') {
+        return { id: itemId, html: renderMultiDailyAdvicePane() };
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function fitMultiInfoAdviceLayout() {
+  const widget = els.multiInfoWidget;
+  const message = widget?.querySelector('.multi-info-advice-message');
+  const author = widget?.querySelector('.multi-info-advice-author');
+  const profile = widget?.querySelector('.multi-info-advice-author-profile');
+  if (!widget || !message || !author) {
+    return;
+  }
+
+  const overflows = () => widget.scrollHeight > widget.clientHeight + 1
+    || message.scrollHeight > message.clientHeight + 1
+    || author.scrollWidth > author.clientWidth + 1
+    || author.scrollHeight > author.clientHeight + 1;
+
+  if (profile && overflows()) {
+    profile.classList.add('hidden');
+  }
+  if (overflows()) {
+    author.classList.add('hidden');
+    widget.classList.add('message-only');
+  }
+}
+
+function renderMultiInfoWidget(options = {}) {
+  const { animate = true, force = false } = options;
+  const panes = getMultiInfoPanes();
+  if (!els.multiInfoWidget || !els.multiInfoContent || panes.length === 0) {
+    clearMultiInfoWidget();
+    return;
+  }
+
+  state.multiInfoActiveIndex %= panes.length;
+  const settings = getMultiWidgetSettings();
+  const activePane = panes[state.multiInfoActiveIndex];
+  const renderKey = `${activePane.id}|${settings.transition}|${activePane.html}`;
+  if (!force && state.multiInfoRenderKey === renderKey && !els.multiInfoWidget.classList.contains('hidden')) {
+    fitMultiInfoAdviceLayout();
+    return;
+  }
+
+  els.multiInfoWidget.classList.remove('hidden', 'message-only');
+  els.multiInfoWidget.dataset.activePane = activePane.id;
+  els.multiInfoContent.className = 'multi-info-content';
+  els.multiInfoContent.innerHTML = activePane.html;
+  state.multiInfoRenderKey = renderKey;
+  if (animate && settings.transition !== 'none') {
+    void els.multiInfoContent.offsetWidth;
+    els.multiInfoContent.classList.add(`multi-info-anim-${settings.transition}`);
+  }
+  fitMultiInfoAdviceLayout();
+}
+
+function syncMultiInfoWidget() {
+  const panes = getMultiInfoPanes();
+  if (panes.length === 0) {
+    if (state.multiInfoTimer) {
+      clearInterval(state.multiInfoTimer);
+      state.multiInfoTimer = null;
+    }
+    state.multiInfoTimerKey = '';
+    clearMultiInfoWidget();
+    return;
+  }
+
+  if (state.multiInfoActiveIndex >= panes.length) {
+    state.multiInfoActiveIndex = 0;
+  }
+  renderMultiInfoWidget({ animate: false });
+
+  if (panes.length <= 1) {
+    if (state.multiInfoTimer) {
+      clearInterval(state.multiInfoTimer);
+      state.multiInfoTimer = null;
+    }
+    state.multiInfoTimerKey = '';
+    return;
+  }
+
+  const settings = getMultiWidgetSettings();
+  const timerKey = `${panes.map((pane) => pane.id).join(',')}|${settings.intervalSeconds}`;
+  if (state.multiInfoTimer && state.multiInfoTimerKey === timerKey) {
+    return;
+  }
+
+  if (state.multiInfoTimer) {
+    clearInterval(state.multiInfoTimer);
+    state.multiInfoTimer = null;
+  }
+  state.multiInfoTimerKey = timerKey;
+  state.multiInfoTimer = setInterval(() => {
+    const currentPanes = getMultiInfoPanes();
+    if (currentPanes.length === 0) {
+      clearInterval(state.multiInfoTimer);
+      state.multiInfoTimer = null;
+      state.multiInfoTimerKey = '';
+      clearMultiInfoWidget();
+      return;
+    }
+    state.multiInfoActiveIndex = (state.multiInfoActiveIndex + 1) % currentPanes.length;
+    renderMultiInfoWidget({ animate: true });
+  }, settings.intervalSeconds * 1000);
 }
 
 function clearSolarTermWidget() {
@@ -2360,12 +3081,12 @@ function getSolarTermDisplayInfo(now = new Date()) {
 }
 
 function renderSolarTermWidget() {
+  const info = getSolarTermDisplayInfo();
   if (!isSidebarWidgetVisible('solarTerm')) {
     clearSolarTermWidget();
-    return false;
+    return !!info;
   }
 
-  const info = getSolarTermDisplayInfo();
   if (!info) {
     clearSolarTermWidget();
     return false;
@@ -2401,23 +3122,24 @@ async function loadSolarTermYearFromCache(year) {
 }
 
 async function refreshSolarTermYearInBackground(year) {
-  if (!isSidebarWidgetVisible('solarTerm')) {
+  if (!shouldUseSolarTermData()) {
     return;
   }
 
   const result = await window.desktopAPI.refreshSolarTermsYear(year);
-  if (!isSidebarWidgetVisible('solarTerm')) {
+  if (!shouldUseSolarTermData()) {
     return;
   }
 
   if (result?.cache?.terms?.length) {
     state.solarTermYears[year] = result.cache;
     renderSolarTermWidget();
+    syncMultiInfoWidget();
   }
 }
 
 async function loadSolarTermWidget() {
-  if (state.solarTermLoading || !isSidebarWidgetVisible('solarTerm')) {
+  if (state.solarTermLoading || !shouldUseSolarTermData()) {
     return;
   }
 
@@ -2429,6 +3151,7 @@ async function loadSolarTermWidget() {
       await loadSolarTermYearFromCache(year + 1);
       renderSolarTermWidget();
     }
+    syncMultiInfoWidget();
 
     refreshSolarTermYearInBackground(year).catch(() => {});
     const hasFutureThisYear = (state.solarTermYears[year]?.terms || []).some((term) => term.date >= formatLocalDateKey());
@@ -2441,12 +3164,13 @@ async function loadSolarTermWidget() {
 }
 
 function syncSolarTermUpdates() {
-  if (!isSidebarWidgetVisible('solarTerm')) {
+  if (!shouldUseSolarTermData()) {
     if (state.solarTermTimer) {
       clearInterval(state.solarTermTimer);
       state.solarTermTimer = null;
     }
     clearSolarTermWidget();
+    syncMultiInfoWidget();
     return;
   }
 
@@ -2460,41 +3184,127 @@ function clearDailyAdviceWidget() {
   els.dailyAdviceWidget?.classList.add('hidden');
 }
 
-function renderDailyAdviceWidget(advice = fallbackDailyAdvice) {
-  if (!isSidebarWidgetVisible('dailyAdvice')) {
-    clearDailyAdviceWidget();
+function dailyAdviceOverflows() {
+  const widget = els.dailyAdviceWidget;
+  if (!widget) {
+    return false;
+  }
+  return widget.scrollHeight > widget.clientHeight + 1;
+}
+
+function dailyAdviceMessageClipped() {
+  const message = els.dailyAdviceMessage;
+  if (!message) {
+    return false;
+  }
+  return message.scrollHeight > message.clientHeight + 1;
+}
+
+function dailyAdviceAuthorClipped() {
+  const author = els.dailyAdviceAuthor;
+  if (!author || author.classList.contains('hidden')) {
+    return false;
+  }
+  return author.scrollWidth > author.clientWidth + 1 || author.scrollHeight > author.clientHeight + 1;
+}
+
+function getDailyAdviceMessageLineHeight() {
+  if (!els.dailyAdviceMessage) {
+    return 0;
+  }
+  const styles = getComputedStyle(els.dailyAdviceMessage);
+  const lineHeight = Number.parseFloat(styles.lineHeight);
+  if (Number.isFinite(lineHeight) && lineHeight > 0) {
+    return lineHeight;
+  }
+  const fontSize = Number.parseFloat(styles.fontSize);
+  return Number.isFinite(fontSize) && fontSize > 0 ? fontSize * 1.42 : 0;
+}
+
+function fitDailyAdviceMessageOnly() {
+  const widget = els.dailyAdviceWidget;
+  const message = els.dailyAdviceMessage;
+  if (!widget || !message) {
     return;
   }
 
-  const message = typeof advice.message === 'string' && advice.message.trim()
-    ? advice.message.trim()
-    : fallbackDailyAdvice.message;
-  const author = typeof advice.author === 'string' ? advice.author.trim() : '';
-  const authorProfile = typeof advice.authorProfile === 'string' ? advice.authorProfile.trim() : '';
+  widget.classList.add('message-only');
+  const lineHeight = getDailyAdviceMessageLineHeight();
+  const title = widget.querySelector('.daily-advice-title');
+  const titleHeight = title ? title.getBoundingClientRect().height : 0;
+  const styles = getComputedStyle(widget);
+  const verticalPadding = Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom);
+  const gap = Number.parseFloat(styles.rowGap || styles.gap) || 0;
+  const availableHeight = Math.max(0, widget.clientHeight - verticalPadding - titleHeight - gap);
+  const maxLines = lineHeight > 0 ? Math.max(1, Math.floor(availableHeight / lineHeight)) : 4;
+  message.style.setProperty('--daily-advice-message-lines', String(maxLines));
+}
+
+function fitDailyAdviceLayout({ author, authorProfile }) {
+  const widget = els.dailyAdviceWidget;
+  if (!widget) {
+    return;
+  }
+
+  widget.classList.remove('message-only');
+  els.dailyAdviceMessage?.style.removeProperty('--daily-advice-message-lines');
+
+  const hasAuthor = !!author;
+  const hasProfile = !!authorProfile;
+  els.dailyAdviceAuthor?.classList.toggle('hidden', !hasAuthor);
+  els.dailyAdviceAuthorName?.classList.toggle('hidden', !hasAuthor);
+  els.dailyAdviceAuthorProfile?.classList.toggle('hidden', !hasProfile);
+
+  if ((dailyAdviceOverflows() || dailyAdviceMessageClipped() || dailyAdviceAuthorClipped()) && hasProfile) {
+    els.dailyAdviceAuthorProfile?.classList.add('hidden');
+  }
+
+  if ((dailyAdviceOverflows() || dailyAdviceMessageClipped() || dailyAdviceAuthorClipped()) && hasAuthor) {
+    els.dailyAdviceAuthor?.classList.add('hidden');
+    fitDailyAdviceMessageOnly();
+  }
+}
+
+function renderDailyAdviceWidget(advice = fallbackDailyAdvice) {
+  const normalizedAdvice = normalizeAdviceForDisplay(advice);
+  state.dailyAdviceData = normalizedAdvice;
+  if (!isSidebarWidgetVisible('dailyAdvice')) {
+    clearDailyAdviceWidget();
+    syncMultiInfoWidget();
+    return;
+  }
 
   if (els.dailyAdviceMessage) {
-    els.dailyAdviceMessage.textContent = message;
+    els.dailyAdviceMessage.textContent = normalizedAdvice.message;
   }
 
-  if (els.dailyAdviceAuthor) {
-    const authorText = author ? (authorProfile ? `${author} · ${authorProfile}` : author) : '';
-    els.dailyAdviceAuthor.textContent = authorText;
-    els.dailyAdviceAuthor.classList.toggle('hidden', !authorText);
+  if (els.dailyAdviceAuthorName) {
+    els.dailyAdviceAuthorName.textContent = normalizedAdvice.author;
+  }
+  if (els.dailyAdviceAuthorProfile) {
+    els.dailyAdviceAuthorProfile.textContent = normalizedAdvice.authorProfile;
   }
 
-  els.dailyAdviceWidget?.classList.remove('hidden');
+  if (els.dailyAdviceWidget) {
+    els.dailyAdviceWidget.dataset.author = normalizedAdvice.author;
+    els.dailyAdviceWidget.dataset.authorProfile = normalizedAdvice.authorProfile;
+    els.dailyAdviceWidget.classList.remove('hidden');
+  }
+  fitDailyAdviceLayout({ author: normalizedAdvice.author, authorProfile: normalizedAdvice.authorProfile });
+  syncMultiInfoWidget();
 }
 
 async function loadDailyAdvice(forceRefresh = false) {
-  if (state.adviceLoading || !isSidebarWidgetVisible('dailyAdvice')) {
+  if (state.adviceLoading || !shouldUseDailyAdviceData()) {
     return;
   }
 
   state.adviceLoading = true;
   try {
     const result = await window.desktopAPI.getDailyAdvice(forceRefresh);
-    if (!isSidebarWidgetVisible('dailyAdvice')) {
+    if (!shouldUseDailyAdviceData()) {
       clearDailyAdviceWidget();
+      syncMultiInfoWidget();
       return;
     }
     renderDailyAdviceWidget(result?.advice || fallbackDailyAdvice);
@@ -2520,7 +3330,7 @@ function scheduleNextDailyAdviceRefresh() {
     state.adviceTimer = null;
   }
 
-  if (!isSidebarWidgetVisible('dailyAdvice')) {
+  if (!shouldUseDailyAdviceData()) {
     return;
   }
 
@@ -2532,12 +3342,13 @@ function scheduleNextDailyAdviceRefresh() {
 }
 
 function syncDailyAdviceUpdates() {
-  if (!isSidebarWidgetVisible('dailyAdvice')) {
+  if (!shouldUseDailyAdviceData()) {
     if (state.adviceTimer) {
       clearTimeout(state.adviceTimer);
       state.adviceTimer = null;
     }
     clearDailyAdviceWidget();
+    syncMultiInfoWidget();
     return;
   }
 
@@ -2545,15 +3356,24 @@ function syncDailyAdviceUpdates() {
   scheduleNextDailyAdviceRefresh();
 }
 
-function describeAirQuality(aqi) {
-  if (!Number.isFinite(aqi)) {
-    return '\uB300\uAE30\uC9C8 \uD655\uC778 \uC911';
+function refitDailyAdviceLayout() {
+  const widget = els.dailyAdviceWidget;
+  if (!widget || widget.classList.contains('hidden')) {
+    return;
   }
-  if (aqi <= 20) return '\uB300\uAE30\uC9C8 \uB9E4\uC6B0 \uC88B\uC74C';
-  if (aqi <= 40) return '\uB300\uAE30\uC9C8 \uC88B\uC74C';
-  if (aqi <= 60) return '\uB300\uAE30\uC9C8 \uBCF4\uD1B5';
-  if (aqi <= 80) return '\uB300\uAE30\uC9C8 \uB098\uC068';
-  return '\uB300\uAE30\uC9C8 \uB9E4\uC6B0 \uB098\uC068';
+  fitDailyAdviceLayout({
+    author: widget.dataset.author || '',
+    authorProfile: widget.dataset.authorProfile || ''
+  });
+}
+
+function renderAirQuality(currentAir = {}) {
+  if (!els.weatherAirQuality) {
+    return;
+  }
+
+  const airQuality = getKoreanAirQuality(currentAir.pm2_5, currentAir.pm10);
+  els.weatherAirQuality.textContent = airQuality.representative;
 }
 
 async function updateWeather() {
@@ -2566,7 +3386,7 @@ async function updateWeather() {
   const latitude = station.latitude;
   const longitude = station.longitude;
   const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,apparent_temperature,weather_code&hourly=precipitation_probability&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FSeoul&forecast_days=1`;
-  const airUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${latitude}&longitude=${longitude}&current=european_aqi&timezone=Asia%2FSeoul`;
+  const airUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${latitude}&longitude=${longitude}&current=pm2_5,pm10&timezone=Asia%2FSeoul`;
 
   try {
     const [forecastResponse, airResponse] = await Promise.all([fetch(forecastUrl), fetch(airUrl)]);
@@ -2595,14 +3415,18 @@ async function updateWeather() {
 
     els.weatherIcon.innerHTML = getWeatherIcon(Number(current.weather_code));
     els.weatherTemp.textContent = `${Math.round(Number(current.temperature_2m))}\u00B0`;
-    els.weatherAirQuality.textContent = describeAirQuality(Number(air.current?.european_aqi)).replace(/^대기질\s*/, '');
+    renderAirQuality(air.current);
     els.weatherHigh.textContent = `\uCD5C\uACE0 ${Math.round(Number(daily.temperature_2m_max?.[0]))}\u00B0`;
     els.weatherLow.textContent = `\uCD5C\uC800 ${Math.round(Number(daily.temperature_2m_min?.[0]))}\u00B0`;
     els.weatherSunTime.textContent = formatHourMinute(sunValue);
     els.weatherPrecip.textContent = `${Number.isFinite(Number(precip)) ? Math.round(Number(precip)) : 0}%`;
     state.weatherLastUpdatedAt = new Date().toISOString();
+    setWeatherWidgetLoadFailed(false);
     updateStatusToast();
   } catch (err) {
+    state.weatherLastUpdatedAt = null;
+    setWeatherWidgetLoadFailed(true);
+    updateStatusToast();
     showStatusOverride('\uB0A0\uC528 \uAC31\uC2E0 \uC2E4\uD328');
   }
 }
@@ -2635,6 +3459,8 @@ function updateBackgroundWidgetTasks({ forceWeather = false } = {}) {
   syncTimetableUpdates();
   syncSolarTermUpdates();
   syncDailyAdviceUpdates();
+  syncMultiInfoWidget();
+  updateStatusToast();
 }
 
 function updateClock() {
@@ -2657,7 +3483,16 @@ function updateClock() {
     els.sidebarDate.textContent = `${month}\uC6D4 ${date}\uC77C ${day}`;
   }
   if (els.sidebarClock) {
-    els.sidebarClock.textContent = `${period} ${hours12}:${minutes}:${seconds}`;
+    els.sidebarClock.innerHTML = `
+      <span class="sidebar-clock-period">${period}</span>
+      <span class="sidebar-clock-time">
+        <span class="clock-unit">${String(hours12).padStart(2, '0')}</span>
+        <span class="clock-separator">:</span>
+        <span class="clock-unit">${minutes}</span>
+        <span class="clock-separator">:</span>
+        <span class="clock-unit">${seconds}</span>
+      </span>
+    `;
   }
 }
 
@@ -2682,6 +3517,9 @@ arrangeSidebarInfoCards();
 syncClockUpdates();
 
 async function init() {
+  if (typeof window.desktopAPI.getDefaultConfig === 'function') {
+    defaultConfig = await window.desktopAPI.getDefaultConfig();
+  }
   const config = await window.desktopAPI.getConfig();
   state.savedConfig = deepClone(config);
   state.draftConfig = mergeUIState(state.savedConfig, config);
@@ -2703,6 +3541,7 @@ async function init() {
   applyLayout();
   applySidebarWidth(state.draftConfig.sidebar?.width);
   applyBrowserSettings();
+  logSmssLayoutState('init');
   applySettingsToForm();
   renderPlaylist();
   updateBackgroundWidgetTasks();
