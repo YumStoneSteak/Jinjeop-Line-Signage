@@ -1,4 +1,5 @@
-const { app, BrowserWindow, dialog, ipcMain, screen, session } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, screen, session, shell } = require('electron');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -7,7 +8,8 @@ const {
   DEFAULT_LOGO_RELATIVE_PATH,
   SIDEBAR_WIDGET_DEFAULTS_VERSION,
   defaultSidebarWidgets,
-  createDefaultConfig
+  createDefaultConfig,
+  normalizeBrowserZoomPercent
 } = require('./config-defaults');
 
 let mainWindow;
@@ -17,6 +19,7 @@ let draftConfig = null;
 let persistedConfig = null;
 let bypassClosePrompt = false;
 let presentationMode = true;
+let pendingAutoStartWarning = null;
 let lastPopupRequest = { url: '', mode: '', at: 0 };
 let allowProgrammaticMinimize = false;
 let lastSmssSuccessAt = null;
@@ -27,8 +30,19 @@ let smssLogFileUnavailable = false;
 
 const SMSS_HOST = 'smss.seoulmetro.co.kr';
 const SMSS_WEBREQUEST_FILTER = { urls: [`*://${SMSS_HOST}/*`] };
+const AUTO_START_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const APP_ID = 'kr.or.ncuc.jinjeop-line-signage';
+const DISPLAY_APP_NAME = 'Jinjeop Line Signage';
+const KOREAN_APP_NAME = '진접선 행선안내 사이니지';
+const AUTO_START_VALUE_NAME = 'JinjeopLineSignage';
+const LEGACY_AUTO_START_VALUE_NAMES = ['NamyangjuDashboard'];
 const smssDiagnosticContents = new Set();
 const smssConsoleForwardContents = new Set();
+
+app.setName(DISPLAY_APP_NAME);
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_ID);
+}
 
 const ADVICE_API_URL = 'https://korean-advice-open-api.vercel.app/api/advice';
 const fallbackAdvice = {
@@ -61,11 +75,46 @@ function getDefaultLogoPath() {
   return uniqueCandidates.find((candidate) => fs.existsSync(candidate)) || uniqueCandidates[0];
 }
 
-const defaultConfig = createDefaultConfig({
-  sidebar: {
-    logoPath: getDefaultLogoPath()
-  }
-});
+const defaultConfig = createDefaultConfig();
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function normalizeWindowSettings(input) {
+  const defaults = defaultConfig.window || {};
+  const source = input && typeof input === 'object' ? input : {};
+  return {
+    ...defaults,
+    ...source,
+    alwaysOnTop: hasOwn(source, 'alwaysOnTop') ? !!source.alwaysOnTop : !!defaults.alwaysOnTop,
+    preventMinimize: hasOwn(source, 'preventMinimize') ? !!source.preventMinimize : !!defaults.preventMinimize,
+    autoStart: hasOwn(source, 'autoStart') ? !!source.autoStart : !!defaults.autoStart,
+    startFullscreen: hasOwn(source, 'startFullscreen') ? !!source.startFullscreen : !!defaults.startFullscreen
+  };
+}
+
+function normalizeUiSettings(input) {
+  const defaults = defaultConfig.ui || { adminOptionsEnabled: false };
+  const source = input && typeof input === 'object' ? input : {};
+  return {
+    ...defaults,
+    ...source,
+    adminOptionsEnabled: hasOwn(source, 'adminOptionsEnabled')
+      ? !!source.adminOptionsEnabled
+      : !!defaults.adminOptionsEnabled
+  };
+}
+
+function hasMissingStartupWindowConfig(config) {
+  const windowConfig = config?.window || {};
+  return !hasOwn(windowConfig, 'autoStart') || !hasOwn(windowConfig, 'startFullscreen');
+}
+
+function hasMissingUiConfig(config) {
+  const uiConfig = config?.ui || {};
+  return !hasOwn(uiConfig, 'adminOptionsEnabled');
+}
 
 const timetableStations = {
   '408': { stationName: '별내별가람역', stationId: '0408', stationCode: '408' },
@@ -759,11 +808,108 @@ function readTimetableCache() {
 }
 
 function normalizeZoomPercent(value) {
-  const numeric = Number.parseInt(value, 10);
-  if (!Number.isFinite(numeric)) {
-    return defaultConfig.browser.zoomPercent;
+  return normalizeBrowserZoomPercent(value);
+}
+
+function clampRatio(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
   }
-  return Math.min(300, Math.max(25, numeric));
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return Math.min(1, Math.max(0, numeric));
+}
+
+function normalizeDragReplayGesture(input) {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const startXRatio = clampRatio(input.startXRatio);
+  const startYRatio = clampRatio(input.startYRatio);
+  const endXRatio = clampRatio(input.endXRatio);
+  const endYRatio = clampRatio(input.endYRatio);
+  if ([startXRatio, startYRatio, endXRatio, endYRatio].some((value) => value === null)) {
+    return null;
+  }
+
+  const durationMs = Number.parseInt(input.durationMs, 10);
+  return {
+    startXRatio,
+    startYRatio,
+    endXRatio,
+    endYRatio,
+    durationMs: Math.min(5000, Math.max(120, Number.isFinite(durationMs) ? durationMs : 700))
+  };
+}
+
+function normalizeDragReplaySettings(input) {
+  const defaults = defaultConfig.browser?.dragReplay || { enabled: true, gesture: null };
+  const source = input && typeof input === 'object' ? input : defaults;
+  const defaultGesture = normalizeDragReplayGesture(source.defaultGesture)
+    || normalizeDragReplayGesture(defaults.defaultGesture)
+    || normalizeDragReplayGesture(defaults.gesture);
+  const gesture = hasOwn(source, 'gesture')
+    ? normalizeDragReplayGesture(source.gesture) || defaultGesture
+    : defaultGesture;
+  return {
+    enabled: !!source.enabled,
+    gesture,
+    defaultGesture
+  };
+}
+
+function normalizePublishDate(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return '';
+  }
+  const date = new Date(`${text}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? '' : text;
+}
+
+function normalizePlaylistItem(item) {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+
+  const pathValue = typeof item.path === 'string' ? item.path : '';
+  if (!pathValue) {
+    return null;
+  }
+
+  return {
+    path: pathValue,
+    type: item.type === 'video' ? 'video' : 'image',
+    duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
+    publishStartDate: normalizePublishDate(item.publishStartDate),
+    publishEndDate: normalizePublishDate(item.publishEndDate)
+  };
+}
+
+function normalizePlaylist(playlist) {
+  return (Array.isArray(playlist) ? playlist : [])
+    .map(normalizePlaylistItem)
+    .filter(Boolean);
+}
+
+function normalizeTrainInfoAutoRefreshIntervalHours(value) {
+  const numeric = Number.parseFloat(value);
+  if (!Number.isFinite(numeric)) {
+    return defaultConfig.browser?.autoRefresh?.intervalHours || 6;
+  }
+  return Math.min(168, Math.max(1, Math.round(numeric * 10) / 10));
+}
+
+function normalizeTrainInfoAutoRefreshSettings(input) {
+  const defaults = defaultConfig.browser?.autoRefresh || { enabled: true, intervalHours: 6 };
+  const source = input && typeof input === 'object' ? input : defaults;
+  return {
+    enabled: !!source.enabled,
+    intervalHours: normalizeTrainInfoAutoRefreshIntervalHours(source.intervalHours)
+  };
 }
 
 function getPopupMode() {
@@ -986,13 +1132,16 @@ function mergeConfig(userConfig) {
     browser: {
       url: normalizeUrl(browserConfig.url || defaultConfig.browser.url),
       popupMode: ['block', 'allow', 'current'].includes(browserConfig.popupMode) ? browserConfig.popupMode : defaultConfig.browser.popupMode,
-      zoomPercent: normalizeZoomPercent(browserConfig.zoomPercent)
+      zoomPercent: normalizeZoomPercent(browserConfig.zoomPercent),
+      dragReplay: normalizeDragReplaySettings(browserConfig.dragReplay),
+      autoRefresh: normalizeTrainInfoAutoRefreshSettings(browserConfig.autoRefresh)
     },
     player: {
       transition: normalizeTransition(userConfig.player?.transition),
-      playlist: Array.isArray(userConfig?.player?.playlist) ? userConfig.player.playlist : []
+      playlist: normalizePlaylist(userConfig?.player?.playlist)
     },
-    window: { ...defaultConfig.window, ...(userConfig.window || {}) },
+    window: normalizeWindowSettings(userConfig.window),
+    ui: normalizeUiSettings(userConfig.ui),
     sidebar: {
       ...defaultConfig.sidebar,
       ...(userConfig.sidebar || {}),
@@ -1350,7 +1499,7 @@ function loadConfig() {
     const parsed = JSON.parse(raw);
     persistedConfig = mergeConfig(parsed);
     draftConfig = deepClone(persistedConfig);
-    if (hasUnknownPlayerConfig(parsed)) {
+    if (hasUnknownPlayerConfig(parsed) || hasMissingStartupWindowConfig(parsed) || hasMissingUiConfig(parsed)) {
       fs.writeFileSync(configPath, JSON.stringify(persistedConfig, null, 2), 'utf-8');
     }
   } catch (err) {
@@ -1377,6 +1526,313 @@ function applyWindowOptions() {
 
   const { alwaysOnTop } = persistedConfig.window;
   mainWindow.setAlwaysOnTop(!!alwaysOnTop, 'screen-saver');
+}
+
+function getAutoStartLaunchOptions() {
+  const executablePath = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+  const args = process.defaultApp
+    ? [app.getAppPath(), '--autostart']
+    : ['--autostart'];
+  return {
+    path: executablePath,
+    args,
+    name: DISPLAY_APP_NAME
+  };
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function quoteCommandLineArg(value) {
+  return `"${String(value || '').replace(/"/g, '\\"')}"`;
+}
+
+function getAutoStartCommandLine(launchOptions = getAutoStartLaunchOptions()) {
+  return [
+    quoteCommandLineArg(launchOptions.path),
+    ...launchOptions.args.map((arg) => quoteCommandLineArg(arg))
+  ].join(' ');
+}
+
+function commandLinesEqual(a, b) {
+  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+function readAutoStartRegistryValue(valueName = AUTO_START_VALUE_NAME) {
+  try {
+    const output = execFileSync('reg.exe', ['query', AUTO_START_RUN_KEY, '/v', valueName], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const valueLine = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.startsWith(valueName));
+    if (!valueLine) {
+      return '';
+    }
+    const match = valueLine.match(new RegExp(`^${escapeRegExp(valueName)}\\s+REG_\\w+\\s+(.+)$`));
+    return match ? match[1].trim() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function writeAutoStartRegistryValue(enabled, launchOptions = getAutoStartLaunchOptions(), valueName = AUTO_START_VALUE_NAME) {
+  try {
+    if (!enabled) {
+      execFileSync('reg.exe', ['delete', AUTO_START_RUN_KEY, '/v', valueName, '/f'], {
+        windowsHide: true,
+        timeout: 2000,
+        stdio: 'ignore'
+      });
+      return null;
+    }
+
+    execFileSync('reg.exe', [
+      'add',
+      AUTO_START_RUN_KEY,
+      '/v',
+      valueName,
+      '/t',
+      'REG_SZ',
+      '/d',
+      getAutoStartCommandLine(launchOptions),
+      '/f'
+    ], {
+      windowsHide: true,
+      timeout: 2000,
+      stdio: 'ignore'
+    });
+    return null;
+  } catch (err) {
+    if (!enabled) {
+      return null;
+    }
+    return err;
+  }
+}
+
+function cleanupLegacyAutoStartRegistryValues() {
+  LEGACY_AUTO_START_VALUE_NAMES.forEach((valueName) => {
+    writeAutoStartRegistryValue(false, getAutoStartLaunchOptions(), valueName);
+  });
+}
+
+function getAutoStartStatus() {
+  const desired = !!persistedConfig?.window?.autoStart;
+  if (process.platform !== 'win32') {
+    return {
+      supported: false,
+      desired,
+      openAtLogin: false,
+      wasOpenedAtLogin: false,
+      error: null
+    };
+  }
+
+  const launchOptions = getAutoStartLaunchOptions();
+  const expectedRegistryValue = getAutoStartCommandLine(launchOptions);
+  const registryValue = readAutoStartRegistryValue(AUTO_START_VALUE_NAME);
+  const legacyRegistryValues = LEGACY_AUTO_START_VALUE_NAMES
+    .map((valueName) => ({
+      valueName,
+      value: readAutoStartRegistryValue(valueName)
+    }))
+    .filter((entry) => !!entry.value);
+  const registryOpenAtLogin = commandLinesEqual(registryValue, expectedRegistryValue)
+    || legacyRegistryValues.some((entry) => commandLinesEqual(entry.value, expectedRegistryValue));
+  try {
+    const settings = app.getLoginItemSettings({
+      path: launchOptions.path,
+      args: launchOptions.args,
+      name: AUTO_START_VALUE_NAME
+    });
+    return {
+      supported: true,
+      desired,
+      openAtLogin: !!settings.openAtLogin || registryOpenAtLogin,
+      wasOpenedAtLogin: !!settings.wasOpenedAtLogin,
+      path: launchOptions.path,
+      args: launchOptions.args,
+      registryValue,
+      legacyRegistryValues,
+      expectedRegistryValue,
+      error: null
+    };
+  } catch (err) {
+    return {
+      supported: true,
+      desired,
+      openAtLogin: registryOpenAtLogin,
+      wasOpenedAtLogin: false,
+      path: launchOptions.path,
+      args: launchOptions.args,
+      registryValue,
+      legacyRegistryValues,
+      expectedRegistryValue,
+      error: err.message
+    };
+  }
+}
+
+function queueAutoStartWarning(detail) {
+  pendingAutoStartWarning = detail;
+  flushAutoStartWarning();
+}
+
+function flushAutoStartWarning() {
+  if (!pendingAutoStartWarning || !mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const warning = pendingAutoStartWarning;
+  pendingAutoStartWarning = null;
+  dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['확인'],
+    defaultId: 0,
+    message: 'Windows 시작 프로그램 등록을 자동으로 완료하지 못했습니다.',
+    detail: [
+      warning.error ? `오류: ${warning.error}` : 'Windows 설정에서 시작 앱 권한이 차단되었을 수 있습니다.',
+      '설정 > 앱 > 시작 프로그램에서 이 사이니지 앱을 켜 주세요.',
+      '설정 화면에서 "Windows 시작 시 자동 실행"을 껐다가 다시 켜고 저장하면 재등록을 다시 시도합니다.'
+    ].join('\n')
+  }).catch((err) => {
+    console.error('Failed to show auto-start warning:', err);
+  });
+}
+
+function syncAutoStartSetting({ notifyOnFailure = false } = {}) {
+  if (process.platform !== 'win32') {
+    return getAutoStartStatus();
+  }
+
+  const desired = !!persistedConfig?.window?.autoStart;
+  const launchOptions = getAutoStartLaunchOptions();
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: desired,
+      openAsHidden: false,
+      path: launchOptions.path,
+      args: launchOptions.args,
+      name: AUTO_START_VALUE_NAME
+    });
+
+    if (desired) {
+      cleanupLegacyAutoStartRegistryValues();
+    }
+
+    if (!desired && launchOptions.args.length) {
+      app.setLoginItemSettings({
+        openAtLogin: false,
+        path: launchOptions.path,
+        args: [],
+        name: AUTO_START_VALUE_NAME
+      });
+    }
+
+    let status = getAutoStartStatus();
+    const expectedRegistryValue = getAutoStartCommandLine(launchOptions);
+    if (desired && !commandLinesEqual(status.registryValue, expectedRegistryValue)) {
+      const registryError = writeAutoStartRegistryValue(true, launchOptions);
+      cleanupLegacyAutoStartRegistryValues();
+      status = getAutoStartStatus();
+      if (registryError && !status.openAtLogin) {
+        status.error = registryError.message;
+      }
+    }
+    if (!desired) {
+      writeAutoStartRegistryValue(false, launchOptions);
+      cleanupLegacyAutoStartRegistryValues();
+      status = getAutoStartStatus();
+    }
+    if (notifyOnFailure && desired && !status.openAtLogin) {
+      queueAutoStartWarning(status);
+    }
+    return status;
+  } catch (err) {
+    const status = {
+      supported: true,
+      desired,
+      openAtLogin: false,
+      wasOpenedAtLogin: false,
+      path: launchOptions.path,
+      args: launchOptions.args,
+      error: err.message
+    };
+    if (desired) {
+      const registryError = writeAutoStartRegistryValue(true, launchOptions);
+      cleanupLegacyAutoStartRegistryValues();
+      const fallbackStatus = getAutoStartStatus();
+      status.openAtLogin = fallbackStatus.openAtLogin;
+      status.registryValue = fallbackStatus.registryValue;
+      status.expectedRegistryValue = fallbackStatus.expectedRegistryValue;
+      status.error = status.openAtLogin ? null : (registryError?.message || err.message);
+    } else {
+      writeAutoStartRegistryValue(false, launchOptions);
+      cleanupLegacyAutoStartRegistryValues();
+    }
+    if (notifyOnFailure && desired && !status.openAtLogin) {
+      queueAutoStartWarning(status);
+    }
+    return status;
+  }
+}
+
+function getStartupFolderPath() {
+  return path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+}
+
+async function openStartupFolder() {
+  if (process.platform !== 'win32') {
+    return {
+      ok: false,
+      supported: false,
+      error: 'Windows에서만 시작프로그램 폴더를 열 수 있습니다.'
+    };
+  }
+
+  const folderPath = getStartupFolderPath();
+  try {
+    fs.mkdirSync(folderPath, { recursive: true });
+    const errorMessage = await shell.openPath(folderPath);
+    if (errorMessage) {
+      return { ok: false, supported: true, path: folderPath, error: errorMessage };
+    }
+    return { ok: true, supported: true, path: folderPath, error: null };
+  } catch (err) {
+    return {
+      ok: false,
+      supported: true,
+      path: folderPath,
+      error: err.message || String(err)
+    };
+  }
+}
+
+async function openWindowsStartupSettings() {
+  if (process.platform !== 'win32') {
+    return {
+      ok: false,
+      supported: false,
+      error: 'Windows에서만 시작프로그램 설정 창을 열 수 있습니다.'
+    };
+  }
+
+  try {
+    await shell.openExternal('ms-settings:startupapps');
+    return { ok: true, supported: true, error: null };
+  } catch (err) {
+    return {
+      ok: false,
+      supported: true,
+      error: err.message || String(err)
+    };
+  }
 }
 
 function applyPresentationWindowMode() {
@@ -1409,6 +1865,7 @@ function createMainWindow() {
   };
 
   mainWindow = new BrowserWindow({
+    title: KOREAN_APP_NAME,
     width: 1600,
     height: 900,
     frame: false,
@@ -1444,6 +1901,7 @@ function createMainWindow() {
   mainWindow.once('ready-to-show', () => {
     applyPresentationWindowMode();
     mainWindow.show();
+    flushAutoStartWarning();
   });
 
   mainWindow.on('minimize', (event) => {
@@ -1475,6 +1933,8 @@ function createMainWindow() {
     if (result.response === 0) {
       try {
         writeConfig(draftConfig);
+        syncAutoStartSetting({ notifyOnFailure: true });
+        applyWindowOptions();
       } catch (err) {
         await dialog.showMessageBox(mainWindow, {
           type: 'error',
@@ -1555,6 +2015,8 @@ app.on('web-contents-created', (_event, contents) => {
 
 app.whenReady().then(() => {
   loadConfig();
+  presentationMode = !!persistedConfig?.window?.startFullscreen;
+  syncAutoStartSetting({ notifyOnFailure: true });
   installSmssWebRequestWatchdog();
   createMainWindow();
 
@@ -1588,8 +2050,17 @@ ipcMain.handle('config:get', () => deepClone(persistedConfig || defaultConfig));
 
 ipcMain.handle('config:getDefaults', () => deepClone(defaultConfig));
 
+ipcMain.handle('app:getVersion', () => app.getVersion());
+
+ipcMain.handle('app:getAutoStartStatus', () => getAutoStartStatus());
+
+ipcMain.handle('app:openStartupFolder', () => openStartupFolder());
+
+ipcMain.handle('app:openWindowsStartupSettings', () => openWindowsStartupSettings());
+
 ipcMain.handle('config:save', (_, config) => {
   const saved = writeConfig(config);
+  syncAutoStartSetting({ notifyOnFailure: true });
   applyWindowOptions();
   return deepClone(saved);
 });

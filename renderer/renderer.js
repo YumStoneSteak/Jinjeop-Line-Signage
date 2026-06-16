@@ -1,8 +1,10 @@
 const {
   DEFAULT_LOGO_RELATIVE_PATH,
+  DEFAULT_DRAG_REPLAY_GESTURE,
   SIDEBAR_WIDGET_DEFAULTS_VERSION,
   defaultSidebarWidgets,
-  createDefaultConfig
+  createDefaultConfig,
+  normalizeBrowserZoomPercent
 } = window.dashboardConfigDefaults;
 const { getKoreanAirQuality } = window.dashboardAirQuality;
 const fallbackDailyAdvice = {
@@ -11,6 +13,8 @@ const fallbackDailyAdvice = {
   authorProfile: ''
 };
 const SEOUL_METRO_TRAIN_INFO_URL = 'https://smss.seoulmetro.co.kr/traininfo/traininfoUserView.do';
+const KOREAN_APP_NAME = '진접선 행선안내 사이니지';
+const STARTUP_STATUS_TIMEOUT_MS = 5000;
 
 const solarTermDescriptions = {
   '입춘': '🌸 만물이 소생하는 봄의 시작을 알립니다!',
@@ -48,6 +52,7 @@ const trainStations = {
 };
 
 const state = {
+  appVersion: '',
   savedConfig: null,
   draftConfig: null,
   isFullscreen: false,
@@ -86,11 +91,16 @@ const state = {
   autoLine4TargetUrl: '',
   pendingLine4ZoomInClicks: 0,
   browserRequestedUrl: '',
+  dragRecordInProgress: false,
+  dragRecordRequestId: 0,
+  trainInfoAutoRefreshTimer: null,
+  trainInfoAutoRefreshLastRunAt: null,
   smssLayoutFullscreenState: null
 };
 
 const els = {
   toolbar: document.getElementById('toolbar'),
+  toolbarTitle: document.getElementById('toolbarTitle'),
   topHoverZone: document.getElementById('topHoverZone'),
   fullscreenSidebar: document.getElementById('fullscreenSidebar'),
   sidebarLogoImage: document.getElementById('sidebarLogoImage'),
@@ -141,13 +151,14 @@ const els = {
   btnWindowClose: document.getElementById('btnWindowClose'),
   btnFullscreen: document.getElementById('btnFullscreen'),
   btnSidebarSettings: document.getElementById('btnSidebarSettings'),
+  btnTrainInfoSettings: document.getElementById('btnTrainInfoSettings'),
   btnFileManager: document.getElementById('btnFileManager'),
   btnScreenSettings: document.getElementById('btnScreenSettings'),
 
   filePanel: document.getElementById('filePanel'),
   btnAddFiles: document.getElementById('btnAddFiles'),
   btnCheckMissing: document.getElementById('btnCheckMissing'),
-  btnResetAppDefaults: document.getElementById('btnResetAppDefaults'),
+  btnResetNoticeSettings: document.getElementById('btnResetNoticeSettings'),
   btnCloseFilePanel: document.getElementById('btnCloseFilePanel'),
   playlistTBody: document.querySelector('#playlistTable tbody'),
 
@@ -171,25 +182,72 @@ const els = {
   sidebarWidgetCheckboxes: new Map(),
 
   settingsPanel: document.getElementById('settingsPanel'),
+  appVersionText: document.getElementById('appVersionText'),
+  checkAdminOptions: document.getElementById('checkAdminOptions'),
+  btnResetGeneralSettings: document.getElementById('btnResetGeneralSettings'),
+  btnResetAllDefaults: document.getElementById('btnResetAllDefaults'),
+  btnOpenStartupFolder: document.getElementById('btnOpenStartupFolder'),
+  btnOpenStartupSettings: document.getElementById('btnOpenStartupSettings'),
+
+  trainInfoPanel: document.getElementById('trainInfoPanel'),
+  btnSaveTrainInfoSettings: document.getElementById('btnSaveTrainInfoSettings'),
+  btnResetTrainInfoSettings: document.getElementById('btnResetTrainInfoSettings'),
+  btnCloseTrainInfoPanel: document.getElementById('btnCloseTrainInfoPanel'),
   inputUrl: document.getElementById('inputUrl'),
   inputZoomPercent: document.getElementById('inputZoomPercent'),
   checkBlockPopups: document.getElementById('checkBlockPopups'),
   popupModeDetail: document.getElementById('popupModeDetail'),
   selectPopupMode: document.getElementById('selectPopupMode'),
+  checkDragReplayEnabled: document.getElementById('checkDragReplayEnabled'),
+  checkTrainAutoRefreshEnabled: document.getElementById('checkTrainAutoRefreshEnabled'),
+  inputTrainAutoRefreshHours: document.getElementById('inputTrainAutoRefreshHours'),
+  trainAutoRefreshStatus: document.getElementById('trainAutoRefreshStatus'),
+  btnStartDragRecord: document.getElementById('btnStartDragRecord'),
+  btnClearDragRecord: document.getElementById('btnClearDragRecord'),
+  btnSaveDragReplayDefault: document.getElementById('btnSaveDragReplayDefault'),
+  inputDragStartXPercent: document.getElementById('inputDragStartXPercent'),
+  inputDragStartYPercent: document.getElementById('inputDragStartYPercent'),
+  inputDragEndXPercent: document.getElementById('inputDragEndXPercent'),
+  inputDragEndYPercent: document.getElementById('inputDragEndYPercent'),
+  inputDragDurationMs: document.getElementById('inputDragDurationMs'),
+  dragReplayStatus: document.getElementById('dragReplayStatus'),
   selectSplitRatio: document.getElementById('selectSplitRatio'),
   selectTransition: document.getElementById('selectTransition'),
   checkSwap: document.getElementById('checkSwap'),
   checkAlwaysOnTop: document.getElementById('checkAlwaysOnTop'),
   checkPreventMin: document.getElementById('checkPreventMin'),
+  checkAutoStart: document.getElementById('checkAutoStart'),
+  checkStartFullscreen: document.getElementById('checkStartFullscreen'),
+  startupStatus: document.getElementById('startupStatus'),
   inputSidebarWidth: document.getElementById('inputSidebarWidth'),
   btnSaveSettings: document.getElementById('btnSaveSettings'),
   btnCancelSettings: document.getElementById('btnCancelSettings'),
-  btnResetDefaults: document.getElementById('btnResetDefaults'),
   btnCloseSettings: document.getElementById('btnCloseSettings')
 };
 
 function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
+}
+
+function normalizePublishDate(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return '';
+  }
+  const date = new Date(`${text}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? '' : text;
+}
+
+function normalizeUiSettings(rawSettings) {
+  const defaults = defaultConfig.ui || { adminOptionsEnabled: false };
+  const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : {};
+  return {
+    ...defaults,
+    ...source,
+    adminOptionsEnabled: Object.prototype.hasOwnProperty.call(source, 'adminOptionsEnabled')
+      ? !!source.adminOptionsEnabled
+      : !!defaults.adminOptionsEnabled
+  };
 }
 
 function normalizeForSave(config) {
@@ -199,12 +257,16 @@ function normalizeForSave(config) {
   clone.browser = {
     url: normalizeUrl(clone.browser?.url),
     popupMode: ['block', 'allow', 'current'].includes(clone.browser?.popupMode) ? clone.browser.popupMode : defaultConfig.browser.popupMode,
-    zoomPercent: normalizeZoomPercent(clone.browser?.zoomPercent)
+    zoomPercent: normalizeZoomPercent(clone.browser?.zoomPercent),
+    dragReplay: normalizeDragReplaySettings(clone.browser?.dragReplay),
+    autoRefresh: normalizeTrainInfoAutoRefreshSettings(clone.browser?.autoRefresh)
   };
   clone.layout = {
     ...clone.layout,
     borderEnabled: false
   };
+  clone.window = normalizeWindowSettings(clone.window);
+  clone.ui = normalizeUiSettings(clone.ui);
   clone.sidebar = {
     width: clampSidebarWidth(clone.sidebar?.width),
     logoPath: normalizeLogoPath(clone.sidebar?.logoPath),
@@ -218,7 +280,9 @@ function normalizeForSave(config) {
     playlist: (Array.isArray(playerConfig.playlist) ? playerConfig.playlist : []).map((item) => ({
       path: item.path,
       type: item.type,
-      duration: Number(item.duration) > 0 ? Number(item.duration) : 5
+      duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
+      publishStartDate: normalizePublishDate(item.publishStartDate),
+      publishEndDate: normalizePublishDate(item.publishEndDate)
     }))
   };
   return clone;
@@ -671,11 +735,45 @@ function getPlayableIndex(startIndex) {
   for (let offset = 0; offset < list.length; offset += 1) {
     const idx = (startIndex + offset) % list.length;
     const item = list[idx];
-    if (!item.missing) {
+    if (isPlaylistItemPlayable(item)) {
       return idx;
     }
   }
   return -1;
+}
+
+function getPlayableCount(list = state.draftConfig.player.playlist) {
+  return list.filter((item) => isPlaylistItemPlayable(item)).length;
+}
+
+function getTodayDateKey() {
+  const now = new Date();
+  const local = new Date(now.getTime() - (now.getTimezoneOffset() * 60000));
+  return local.toISOString().slice(0, 10);
+}
+
+function getPlaylistItemPublishState(item, today = getTodayDateKey()) {
+  if (item?.missing) {
+    return { playable: false, label: '⚠ 누락', className: 'warn' };
+  }
+
+  const startDate = normalizePublishDate(item?.publishStartDate);
+  const endDate = normalizePublishDate(item?.publishEndDate);
+  if (startDate && endDate && startDate > endDate) {
+    return { playable: false, label: '기간 오류', className: 'warn' };
+  }
+  if (startDate && today < startDate) {
+    return { playable: false, label: '게시 전', className: 'muted' };
+  }
+  if (endDate && today > endDate) {
+    return { playable: false, label: '게시 종료', className: 'muted' };
+  }
+
+  return { playable: true, label: (startDate || endDate) ? '게시 중' : '정상', className: '' };
+}
+
+function isPlaylistItemPlayable(item) {
+  return getPlaylistItemPublishState(item).playable;
 }
 
 function clearSlideTimer() {
@@ -740,6 +838,7 @@ function showSlide(index, options = {}) {
 
   state.currentIndex = playableIndex;
   const item = list[playableIndex];
+  const hasMultiplePlayableSlides = getPlayableCount(list) > 1;
   const slideKey = getSlideKey(item);
   const alreadyActive = state.activeSlideKey === slideKey
     && ((item.type === 'image' && els.slideImage.classList.contains('active'))
@@ -747,7 +846,7 @@ function showSlide(index, options = {}) {
 
   if (!force && alreadyActive) {
     els.slideCaption.textContent = `${getFilename(item.path)} (${item.type})`;
-    if (item.type === 'image' && !state.isPaused && !state.slideTimer) {
+    if (hasMultiplePlayableSlides && item.type === 'image' && !state.isPaused && !state.slideTimer) {
       const durationMs = Math.max(1, Number(item.duration) || 5) * 1000;
       scheduleNext(durationMs);
     }
@@ -767,9 +866,11 @@ function showSlide(index, options = {}) {
     els.slideImage.src = pathToFileUrl(item.path);
     els.slideImage.classList.add('active');
     state.activeSlideKey = slideKey;
-    applyTransitionClass(els.slideImage);
+    if (hasMultiplePlayableSlides) {
+      applyTransitionClass(els.slideImage);
+    }
 
-    if (!state.isPaused) {
+    if (hasMultiplePlayableSlides && !state.isPaused) {
       const durationMs = Math.max(1, Number(item.duration) || 5) * 1000;
       scheduleNext(durationMs);
     }
@@ -779,10 +880,17 @@ function showSlide(index, options = {}) {
   els.slideVideo.src = pathToFileUrl(item.path);
   els.slideVideo.classList.add('active');
   state.activeSlideKey = slideKey;
-  applyTransitionClass(els.slideVideo);
+  if (hasMultiplePlayableSlides) {
+    applyTransitionClass(els.slideVideo);
+  }
 
   els.slideVideo.onended = () => {
     if (state.isPaused) {
+      return;
+    }
+    if (!hasMultiplePlayableSlides) {
+      els.slideVideo.currentTime = 0;
+      els.slideVideo.play().catch(() => {});
       return;
     }
     nextSlide();
@@ -799,6 +907,9 @@ function nextSlide() {
   const list = state.draftConfig.player.playlist;
   if (!list.length) {
     showEmptyState();
+    return;
+  }
+  if (getPlayableCount(list) <= 1) {
     return;
   }
   const nextIndex = (state.currentIndex + 1) % list.length;
@@ -840,11 +951,96 @@ function applyLayout() {
 }
 
 function normalizeZoomPercent(value) {
-  const numeric = Number.parseInt(value, 10);
-  if (!Number.isFinite(numeric)) {
-    return defaultConfig.browser.zoomPercent;
+  return normalizeBrowserZoomPercent(value);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clampRatio(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
   }
-  return Math.min(300, Math.max(25, numeric));
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return Math.min(1, Math.max(0, numeric));
+}
+
+function normalizeDragReplayGesture(rawGesture) {
+  if (!rawGesture || typeof rawGesture !== 'object') {
+    return null;
+  }
+
+  const startXRatio = clampRatio(rawGesture.startXRatio);
+  const startYRatio = clampRatio(rawGesture.startYRatio);
+  const endXRatio = clampRatio(rawGesture.endXRatio);
+  const endYRatio = clampRatio(rawGesture.endYRatio);
+  if ([startXRatio, startYRatio, endXRatio, endYRatio].some((value) => value === null)) {
+    return null;
+  }
+
+  const durationMs = Number.parseInt(rawGesture.durationMs, 10);
+  return {
+    startXRatio,
+    startYRatio,
+    endXRatio,
+    endYRatio,
+    durationMs: Math.min(5000, Math.max(120, Number.isFinite(durationMs) ? durationMs : 700))
+  };
+}
+
+function normalizeDragReplaySettings(rawSettings) {
+  const defaultDragReplay = defaultConfig.browser?.dragReplay || { enabled: false, gesture: null };
+  const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : defaultDragReplay;
+  const defaultGesture = normalizeDragReplayGesture(source.defaultGesture)
+    || normalizeDragReplayGesture(defaultDragReplay.defaultGesture)
+    || normalizeDragReplayGesture(defaultDragReplay.gesture)
+    || normalizeDragReplayGesture(DEFAULT_DRAG_REPLAY_GESTURE);
+  const gesture = hasOwn(source, 'gesture')
+    ? normalizeDragReplayGesture(source.gesture) || defaultGesture
+    : defaultGesture;
+  return {
+    enabled: !!source.enabled,
+    gesture,
+    defaultGesture
+  };
+}
+
+function normalizeTrainInfoAutoRefreshIntervalHours(value) {
+  const numeric = Number.parseFloat(value);
+  if (!Number.isFinite(numeric)) {
+    return defaultConfig.browser?.autoRefresh?.intervalHours || 6;
+  }
+  return Math.min(168, Math.max(1, Math.round(numeric * 10) / 10));
+}
+
+function normalizeTrainInfoAutoRefreshSettings(rawSettings) {
+  const defaultAutoRefresh = defaultConfig.browser?.autoRefresh || { enabled: true, intervalHours: 6 };
+  const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : defaultAutoRefresh;
+  return {
+    enabled: !!source.enabled,
+    intervalHours: normalizeTrainInfoAutoRefreshIntervalHours(source.intervalHours)
+  };
+}
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function normalizeWindowSettings(rawSettings) {
+  const defaults = defaultConfig.window || {};
+  const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : {};
+  return {
+    ...defaults,
+    ...source,
+    alwaysOnTop: hasOwn(source, 'alwaysOnTop') ? !!source.alwaysOnTop : !!defaults.alwaysOnTop,
+    preventMinimize: hasOwn(source, 'preventMinimize') ? !!source.preventMinimize : !!defaults.preventMinimize,
+    autoStart: hasOwn(source, 'autoStart') ? !!source.autoStart : !!defaults.autoStart,
+    startFullscreen: hasOwn(source, 'startFullscreen') ? !!source.startFullscreen : !!defaults.startFullscreen
+  };
 }
 
 function applyBrowserSettings() {
@@ -887,6 +1083,551 @@ async function setBrowserZoomPercent(value, options = {}) {
   if (syncDraft) {
     await syncDraftState();
   }
+}
+
+function getDraftDragReplaySettings() {
+  return normalizeDragReplaySettings(state.draftConfig?.browser?.dragReplay);
+}
+
+function getDraftDragReplayDefaultGesture() {
+  return getDraftDragReplaySettings().defaultGesture
+    || normalizeDragReplayGesture(DEFAULT_DRAG_REPLAY_GESTURE);
+}
+
+function setDraftDragReplaySettings(nextSettings = {}) {
+  const current = getDraftDragReplaySettings();
+  const hasDefaultGesture = Object.prototype.hasOwnProperty.call(nextSettings, 'defaultGesture');
+  const defaultGesture = hasDefaultGesture
+    ? normalizeDragReplayGesture(nextSettings.defaultGesture) || current.defaultGesture
+    : current.defaultGesture;
+  const hasGesture = Object.prototype.hasOwnProperty.call(nextSettings, 'gesture');
+  const gesture = hasGesture ? normalizeDragReplayGesture(nextSettings.gesture) || defaultGesture : current.gesture || defaultGesture;
+  state.draftConfig.browser = {
+    ...(state.draftConfig.browser || {}),
+    dragReplay: {
+      enabled: Object.prototype.hasOwnProperty.call(nextSettings, 'enabled') ? !!nextSettings.enabled : current.enabled,
+      gesture,
+      defaultGesture
+    }
+  };
+}
+
+function getDraftTrainInfoAutoRefreshSettings() {
+  return normalizeTrainInfoAutoRefreshSettings(state.draftConfig?.browser?.autoRefresh);
+}
+
+function setDraftTrainInfoAutoRefreshSettings(nextSettings = {}) {
+  const current = getDraftTrainInfoAutoRefreshSettings();
+  state.draftConfig.browser = {
+    ...(state.draftConfig.browser || {}),
+    autoRefresh: {
+      enabled: Object.prototype.hasOwnProperty.call(nextSettings, 'enabled') ? !!nextSettings.enabled : current.enabled,
+      intervalHours: Object.prototype.hasOwnProperty.call(nextSettings, 'intervalHours')
+        ? normalizeTrainInfoAutoRefreshIntervalHours(nextSettings.intervalHours)
+        : current.intervalHours
+    }
+  };
+}
+
+function formatTrainInfoAutoRefreshHours(hours) {
+  const normalized = normalizeTrainInfoAutoRefreshIntervalHours(hours);
+  return Number.isInteger(normalized) ? `${normalized}시간` : `${normalized.toFixed(1)}시간`;
+}
+
+function renderTrainInfoAutoRefreshStatus() {
+  const settings = getDraftTrainInfoAutoRefreshSettings();
+  if (els.checkTrainAutoRefreshEnabled) {
+    els.checkTrainAutoRefreshEnabled.checked = settings.enabled;
+  }
+  if (els.inputTrainAutoRefreshHours) {
+    els.inputTrainAutoRefreshHours.value = settings.intervalHours;
+    els.inputTrainAutoRefreshHours.disabled = !settings.enabled;
+  }
+  if (!els.trainAutoRefreshStatus) {
+    return;
+  }
+
+  const baseText = settings.enabled
+    ? `자동 새로고침: ${formatTrainInfoAutoRefreshHours(settings.intervalHours)}마다 실행`
+    : '자동 새로고침: 꺼짐';
+  const lastRunText = state.trainInfoAutoRefreshLastRunAt
+    ? ` / 마지막 실행 ${new Date(state.trainInfoAutoRefreshLastRunAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`
+    : '';
+  els.trainAutoRefreshStatus.textContent = `${baseText}${lastRunText}`;
+}
+
+function clearTrainInfoAutoRefreshTimer() {
+  if (state.trainInfoAutoRefreshTimer) {
+    clearTimeout(state.trainInfoAutoRefreshTimer);
+    state.trainInfoAutoRefreshTimer = null;
+  }
+}
+
+function scheduleTrainInfoAutoRefresh() {
+  clearTrainInfoAutoRefreshTimer();
+  const settings = getDraftTrainInfoAutoRefreshSettings();
+  setDraftTrainInfoAutoRefreshSettings(settings);
+  renderTrainInfoAutoRefreshStatus();
+  if (!settings.enabled) {
+    return;
+  }
+
+  const intervalMs = Math.max(1, settings.intervalHours) * 60 * 60 * 1000;
+  state.trainInfoAutoRefreshTimer = setTimeout(async () => {
+    state.trainInfoAutoRefreshTimer = null;
+    await runTrainInfoAutoRefresh();
+    scheduleTrainInfoAutoRefresh();
+  }, intervalMs);
+}
+
+async function runTrainInfoAutoRefresh() {
+  const settings = getDraftTrainInfoAutoRefreshSettings();
+  if (!settings.enabled) {
+    return false;
+  }
+  state.trainInfoAutoRefreshLastRunAt = new Date().toISOString();
+  renderTrainInfoAutoRefreshStatus();
+  console.log(`[TRAIN INFO AUTO REFRESH] ${JSON.stringify({
+    time: state.trainInfoAutoRefreshLastRunAt,
+    intervalHours: settings.intervalHours
+  })}`);
+  return refreshBrowserAndActivateLine4();
+}
+
+function formatDragReplayPercent(value) {
+  return `${Math.round(Number(value) * 100)}%`;
+}
+
+function ratioToPercentInputValue(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return '';
+  }
+  return String(Math.round(numeric * 1000) / 10);
+}
+
+function ratioFromPercentInput(input) {
+  const numeric = Number.parseFloat(input?.value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return clampRatio(numeric / 100);
+}
+
+function formatDragReplayGesture(gesture) {
+  const normalized = normalizeDragReplayGesture(gesture);
+  if (!normalized) {
+    return '';
+  }
+  return `시작 ${formatDragReplayPercent(normalized.startXRatio)}, ${formatDragReplayPercent(normalized.startYRatio)} -> 끝 ${formatDragReplayPercent(normalized.endXRatio)}, ${formatDragReplayPercent(normalized.endYRatio)} / ${normalized.durationMs}ms`;
+}
+
+function setDragReplayInputValues(gesture) {
+  const normalized = normalizeDragReplayGesture(gesture);
+  const inputMap = [
+    [els.inputDragStartXPercent, normalized?.startXRatio],
+    [els.inputDragStartYPercent, normalized?.startYRatio],
+    [els.inputDragEndXPercent, normalized?.endXRatio],
+    [els.inputDragEndYPercent, normalized?.endYRatio]
+  ];
+
+  inputMap.forEach(([input, value]) => {
+    if (!input) {
+      return;
+    }
+    input.value = normalized ? ratioToPercentInputValue(value) : '';
+    input.disabled = state.dragRecordInProgress || !normalized;
+  });
+
+  if (els.inputDragDurationMs) {
+    els.inputDragDurationMs.value = normalized ? String(normalized.durationMs) : '';
+    els.inputDragDurationMs.disabled = state.dragRecordInProgress || !normalized;
+  }
+}
+
+function readDragReplayGestureFromInputs() {
+  const startXRatio = ratioFromPercentInput(els.inputDragStartXPercent);
+  const startYRatio = ratioFromPercentInput(els.inputDragStartYPercent);
+  const endXRatio = ratioFromPercentInput(els.inputDragEndXPercent);
+  const endYRatio = ratioFromPercentInput(els.inputDragEndYPercent);
+  const durationMs = Number.parseInt(els.inputDragDurationMs?.value, 10);
+  return normalizeDragReplayGesture({
+    startXRatio,
+    startYRatio,
+    endXRatio,
+    endYRatio,
+    durationMs
+  });
+}
+
+async function updateDragReplayGestureFromInputs() {
+  if (state.dragRecordInProgress) {
+    return;
+  }
+
+  const gesture = readDragReplayGestureFromInputs();
+  if (!gesture) {
+    renderDragReplayStatus('드래그 수치가 올바르지 않습니다. 저장된 값을 확인하세요.');
+    return;
+  }
+
+  setDraftDragReplaySettings({ gesture });
+  renderDragReplayStatus();
+  await syncDraftState();
+}
+
+function renderDragReplayStatus(message = '') {
+  const settings = getDraftDragReplaySettings();
+  if (els.checkDragReplayEnabled) {
+    els.checkDragReplayEnabled.checked = settings.enabled;
+  }
+  setDragReplayInputValues(settings.gesture);
+  if (els.btnStartDragRecord) {
+    els.btnStartDragRecord.disabled = state.dragRecordInProgress;
+  }
+  if (els.btnClearDragRecord) {
+    els.btnClearDragRecord.disabled = false;
+  }
+  if (els.btnSaveDragReplayDefault) {
+    els.btnSaveDragReplayDefault.disabled = state.dragRecordInProgress || !settings.gesture;
+  }
+  if (!els.dragReplayStatus) {
+    return;
+  }
+
+  if (message) {
+    els.dragReplayStatus.textContent = message;
+    return;
+  }
+  if (state.dragRecordInProgress) {
+    els.dragReplayStatus.textContent = '드래그 녹화 중: 웹 화면에서 원하는 만큼 드래그하세요.';
+    return;
+  }
+  if (settings.gesture) {
+    els.dragReplayStatus.textContent = `드래그 보정 저장됨: ${formatDragReplayGesture(settings.gesture)}`;
+    return;
+  }
+  els.dragReplayStatus.textContent = '드래그 보정: 기본값 사용 중';
+}
+
+async function startDragReplayRecording() {
+  if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
+    renderDragReplayStatus('드래그 녹화 실패: 웹 화면이 아직 준비되지 않았습니다.');
+    return;
+  }
+  if (state.dragRecordInProgress) {
+    return;
+  }
+
+  state.dragRecordInProgress = true;
+  state.dragRecordRequestId += 1;
+  const requestId = state.dragRecordRequestId;
+  setDraftDragReplaySettings({ gesture: getDraftDragReplaySettings().gesture || getDraftDragReplayDefaultGesture() });
+  renderDragReplayStatus();
+
+  const script = `
+    (() => {
+      if (window.__dashboardDragReplayRecorder && typeof window.__dashboardDragReplayRecorder.cancel === 'function') {
+        window.__dashboardDragReplayRecorder.cancel();
+      }
+
+      return new Promise((resolve) => {
+        let start = null;
+        let done = false;
+        const getSize = () => ({
+          width: Math.max(1, window.innerWidth || document.documentElement.clientWidth || document.body?.clientWidth || 1),
+          height: Math.max(1, window.innerHeight || document.documentElement.clientHeight || document.body?.clientHeight || 1)
+        });
+        const clamp = (value, max) => Math.min(Math.max(0, value), Math.max(0, max));
+        const getPoint = (event) => {
+          const size = getSize();
+          return {
+            x: clamp(Number(event.clientX) || 0, size.width),
+            y: clamp(Number(event.clientY) || 0, size.height),
+            size
+          };
+        };
+        const cleanup = () => {
+          document.removeEventListener('mousedown', onMouseDown, true);
+          document.removeEventListener('mouseup', onMouseUp, true);
+          window.removeEventListener('keydown', onKeyDown, true);
+          if (window.__dashboardDragReplayRecorder === recorder) {
+            delete window.__dashboardDragReplayRecorder;
+          }
+        };
+        const finish = (payload) => {
+          if (done) {
+            return;
+          }
+          done = true;
+          cleanup();
+          resolve(payload);
+        };
+        const onMouseDown = (event) => {
+          if (event.button !== undefined && event.button !== 0) {
+            return;
+          }
+          const point = getPoint(event);
+          start = {
+            x: point.x,
+            y: point.y,
+            at: Date.now()
+          };
+        };
+        const onMouseUp = (event) => {
+          if (!start) {
+            return;
+          }
+          const point = getPoint(event);
+          finish({
+            ok: true,
+            gesture: {
+              startXRatio: start.x / point.size.width,
+              startYRatio: start.y / point.size.height,
+              endXRatio: point.x / point.size.width,
+              endYRatio: point.y / point.size.height,
+              durationMs: Math.max(120, Date.now() - start.at)
+            }
+          });
+        };
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') {
+            finish({ ok: false, cancelled: true });
+          }
+        };
+        const recorder = {
+          cancel: () => finish({ ok: false, cancelled: true })
+        };
+
+        window.__dashboardDragReplayRecorder = recorder;
+        document.addEventListener('mousedown', onMouseDown, true);
+        document.addEventListener('mouseup', onMouseUp, true);
+        window.addEventListener('keydown', onKeyDown, true);
+      });
+    })();
+  `;
+
+  try {
+    const result = await els.browserView.executeJavaScript(script, false);
+    if (requestId !== state.dragRecordRequestId) {
+      return;
+    }
+
+    if (result?.ok) {
+      const gesture = normalizeDragReplayGesture(result.gesture);
+      if (gesture) {
+        setDraftDragReplaySettings({ gesture });
+        state.dragRecordInProgress = false;
+        renderDragReplayStatus();
+        showStatusOverride('드래그 녹화 저장');
+        await syncDraftState();
+        return;
+      }
+    }
+
+    state.dragRecordInProgress = false;
+    renderDragReplayStatus(result?.cancelled ? '드래그 녹화를 중단했습니다.' : '드래그 녹화 실패: 다시 시도하세요.');
+  } catch (err) {
+    if (requestId !== state.dragRecordRequestId) {
+      return;
+    }
+    state.dragRecordInProgress = false;
+    renderDragReplayStatus('드래그 녹화 실패: 웹 화면에서 스크립트를 실행하지 못했습니다.');
+    console.warn('Drag replay recording failed:', err);
+  }
+}
+
+async function stopDragReplayRecording(message = '드래그 녹화를 중단했습니다.') {
+  if (!state.dragRecordInProgress) {
+    return;
+  }
+
+  state.dragRecordRequestId += 1;
+  state.dragRecordInProgress = false;
+  renderDragReplayStatus(message);
+  try {
+    await els.browserView?.executeJavaScript?.(`
+      (() => {
+        if (window.__dashboardDragReplayRecorder && typeof window.__dashboardDragReplayRecorder.cancel === 'function') {
+          window.__dashboardDragReplayRecorder.cancel();
+          return true;
+        }
+        return false;
+      })();
+    `, false);
+  } catch (_) {
+    // The webview may have navigated while recording.
+  }
+}
+
+async function getWebviewViewportSize() {
+  if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
+    return null;
+  }
+
+  try {
+    const size = await els.browserView.executeJavaScript(`
+      (() => ({
+        width: window.innerWidth || document.documentElement.clientWidth || document.body?.clientWidth || 0,
+        height: window.innerHeight || document.documentElement.clientHeight || document.body?.clientHeight || 0
+      }))();
+    `, false);
+    const width = Number(size?.width);
+    const height = Number(size?.height);
+    if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+      return { width, height };
+    }
+  } catch (_) {
+    // Fallback to the host element bounds below.
+  }
+
+  return null;
+}
+
+function gestureToViewportPoints(gesture, viewport) {
+  const width = Math.max(2, Number(viewport?.width) || 2);
+  const height = Math.max(2, Number(viewport?.height) || 2);
+  const normalized = normalizeDragReplayGesture(gesture);
+  if (!normalized) {
+    return null;
+  }
+  const clampX = (value) => Math.min(width - 1, Math.max(1, Math.round(value)));
+  const clampY = (value) => Math.min(height - 1, Math.max(1, Math.round(value)));
+  return {
+    startX: clampX(normalized.startXRatio * width),
+    startY: clampY(normalized.startYRatio * height),
+    endX: clampX(normalized.endXRatio * width),
+    endY: clampY(normalized.endYRatio * height),
+    durationMs: normalized.durationMs
+  };
+}
+
+async function sendWebviewDragInput(points) {
+  if (!els.browserView || typeof els.browserView.sendInputEvent !== 'function') {
+    return false;
+  }
+
+  const steps = Math.min(32, Math.max(4, Math.ceil(points.durationMs / 80)));
+  const stepDelay = Math.max(20, Math.round(points.durationMs / steps));
+  const send = (event) => els.browserView.sendInputEvent(event);
+
+  send({ type: 'mouseMove', x: points.startX, y: points.startY, movementX: 0, movementY: 0 });
+  await delay(60);
+  send({ type: 'mouseDown', x: points.startX, y: points.startY, button: 'left', clickCount: 1 });
+  for (let step = 1; step <= steps; step += 1) {
+    const ratio = step / steps;
+    const x = Math.round(points.startX + ((points.endX - points.startX) * ratio));
+    const y = Math.round(points.startY + ((points.endY - points.startY) * ratio));
+    await delay(stepDelay);
+    send({ type: 'mouseMove', x, y, button: 'left', movementX: x - points.startX, movementY: y - points.startY });
+  }
+  await delay(50);
+  send({ type: 'mouseUp', x: points.endX, y: points.endY, button: 'left', clickCount: 1 });
+  return true;
+}
+
+async function dispatchSyntheticWebviewDrag(gesture) {
+  if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
+    return false;
+  }
+
+  const normalized = normalizeDragReplayGesture(gesture);
+  if (!normalized) {
+    return false;
+  }
+  const payload = JSON.stringify(normalized);
+  const script = `
+    (() => new Promise((resolve) => {
+      const gesture = ${payload};
+      const width = Math.max(2, window.innerWidth || document.documentElement.clientWidth || document.body?.clientWidth || 2);
+      const height = Math.max(2, window.innerHeight || document.documentElement.clientHeight || document.body?.clientHeight || 2);
+      const clampX = (value) => Math.min(width - 1, Math.max(1, Math.round(value)));
+      const clampY = (value) => Math.min(height - 1, Math.max(1, Math.round(value)));
+      const startX = clampX(gesture.startXRatio * width);
+      const startY = clampY(gesture.startYRatio * height);
+      const endX = clampX(gesture.endXRatio * width);
+      const endY = clampY(gesture.endYRatio * height);
+      const steps = Math.min(32, Math.max(4, Math.ceil(gesture.durationMs / 80)));
+      const stepDelay = Math.max(20, Math.round(gesture.durationMs / steps));
+      const dispatch = (name, x, y, buttons) => {
+        const target = document.elementFromPoint(x, y) || document.documentElement || document.body || document;
+        const common = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clientX: x,
+          clientY: y,
+          screenX: x,
+          screenY: y,
+          button: 0,
+          buttons,
+          view: window
+        };
+        try {
+          target.dispatchEvent(new PointerEvent(name.replace('mouse', 'pointer'), {
+            ...common,
+            pointerId: 1,
+            pointerType: 'mouse',
+            isPrimary: true
+          }));
+        } catch (_) {
+          // PointerEvent is not guaranteed in every embedded page.
+        }
+        target.dispatchEvent(new MouseEvent(name, common));
+      };
+
+      dispatch('mousemove', startX, startY, 0);
+      dispatch('mousedown', startX, startY, 1);
+      let step = 0;
+      const move = () => {
+        step += 1;
+        const ratio = step / steps;
+        const x = Math.round(startX + ((endX - startX) * ratio));
+        const y = Math.round(startY + ((endY - startY) * ratio));
+        dispatch('mousemove', x, y, 1);
+        if (step >= steps) {
+          dispatch('mouseup', endX, endY, 0);
+          resolve(true);
+          return;
+        }
+        setTimeout(move, stepDelay);
+      };
+      setTimeout(move, stepDelay);
+    }))();
+  `;
+
+  try {
+    return await els.browserView.executeJavaScript(script, false);
+  } catch (err) {
+    console.warn('Synthetic drag replay failed:', err);
+    return false;
+  }
+}
+
+async function replaySmssDragIfEnabled() {
+  const settings = getDraftDragReplaySettings();
+  if (!settings.enabled || !settings.gesture || !els.browserView) {
+    return false;
+  }
+
+  await delay(350);
+  const viewport = await getWebviewViewportSize();
+  const hostRect = els.browserView.getBoundingClientRect?.();
+  const points = gestureToViewportPoints(settings.gesture, viewport || hostRect);
+  if (!points) {
+    return false;
+  }
+
+  try {
+    const sent = await sendWebviewDragInput(points);
+    if (sent) {
+      return true;
+    }
+  } catch (err) {
+    console.warn('Drag replay input event failed:', err);
+  }
+
+  return dispatchSyntheticWebviewDrag(settings.gesture);
 }
 
 async function activateLine4InBrowser() {
@@ -1069,6 +1810,7 @@ function scheduleAutoActivateLine4(delay = 700) {
       if (zoomInClicks > 0) {
         await clickSmssZoomIn(zoomInClicks);
       }
+      await replaySmssDragIfEnabled();
       state.autoLine4Triggered = true;
       clearTimeout(state.autoLine4Timer);
       state.autoLine4Timer = null;
@@ -1257,6 +1999,18 @@ function updateSidebarOptionVisibility() {
   });
 }
 
+function updateAdminOptionVisibility() {
+  const showAdminOptions = !!state.draftConfig?.ui?.adminOptionsEnabled;
+  document.querySelectorAll('.admin-only').forEach((element) => {
+    element.classList.toggle('hidden', !showAdminOptions);
+  });
+}
+
+function markAdminOnly(element) {
+  element?.classList.add('admin-only');
+  return element;
+}
+
 function setupSidebarSettingsPanel() {
   if (!els.sidebarPanel || els.sidebarPanel.dataset.widgetSettingsReady === 'true') {
     return;
@@ -1280,8 +2034,8 @@ function setupSidebarSettingsPanel() {
   const basicGrid = document.createElement('div');
   basicGrid.className = 'form-grid';
   basicGrid.append(
-    createSidebarWidgetCheckbox('logo', '로고 표시'),
-    createSidebarWidgetCheckbox('station', '현재 역명 표시'),
+    markAdminOnly(createSidebarWidgetCheckbox('logo', '로고 표시')),
+    markAdminOnly(createSidebarWidgetCheckbox('station', '현재 역명 표시')),
   );
   const logoLabel = document.createElement('label');
   logoLabel.className = 'wide-field';
@@ -1298,7 +2052,7 @@ function setupSidebarSettingsPanel() {
   logoPickButton.textContent = '찾기';
   logoPathRow.append(logoPathInput, logoPickButton);
   logoLabel.append(logoPathRow);
-  basicGrid.append(logoLabel);
+  basicGrid.append(markAdminOnly(logoLabel));
   els.inputLogoPath = logoPathInput;
   els.btnPickLogoFile = logoPickButton;
   const stationLabel = els.selectTrainStation?.closest('label');
@@ -1307,15 +2061,18 @@ function setupSidebarSettingsPanel() {
   }
   const widthLabel = els.inputSidebarWidth?.closest('label');
   if (widthLabel) {
-    basicGrid.append(widthLabel);
+    basicGrid.append(markAdminOnly(widthLabel));
   }
   basicSection.append(basicGrid);
 
   const datetimeSection = createSettingsSection('날짜/시간 설정');
   datetimeSection.append(createSidebarWidgetCheckbox('datetime', '날짜/시간 위젯 표시'));
+  markAdminOnly(datetimeSection);
 
   const multiSection = createSettingsSection('멀티 위젯 설정');
-  multiSection.append(createSidebarWidgetCheckbox('multiInfo', '멀티 위젯 표시'));
+  const multiToggleLabel = createSidebarWidgetCheckbox('multiInfo', '멀티 위젯 표시');
+  multiToggleLabel.classList.add('wide-field');
+  multiSection.append(multiToggleLabel);
   const multiOptions = document.createElement('div');
   multiOptions.className = 'widget-options';
   multiOptions.dataset.widgetOptions = 'multiInfo';
@@ -1328,6 +2085,7 @@ function setupSidebarSettingsPanel() {
   multiSolarCheckbox.type = 'checkbox';
   multiSolarLabel.append(multiSolarCheckbox, document.createElement('span'));
   multiSolarLabel.querySelector('span').textContent = '24절기 포함';
+  markAdminOnly(multiSolarLabel);
   const multiAdviceLabel = document.createElement('label');
   multiAdviceLabel.className = 'checkbox-row';
   const multiAdviceCheckbox = document.createElement('input');
@@ -1335,6 +2093,7 @@ function setupSidebarSettingsPanel() {
   multiAdviceCheckbox.type = 'checkbox';
   multiAdviceLabel.append(multiAdviceCheckbox, document.createElement('span'));
   multiAdviceLabel.querySelector('span').textContent = '오늘의 한마디 포함';
+  markAdminOnly(multiAdviceLabel);
   const multiTransitionLabel = document.createElement('label');
   multiTransitionLabel.textContent = '전환 효과';
   const multiTransitionSelect = document.createElement('select');
@@ -1377,6 +2136,7 @@ function setupSidebarSettingsPanel() {
   solarTermNote.textContent = '오늘 또는 다음 24절기를 로컬 캐시 기준으로 표시합니다.';
   solarTermSection.append(solarTermNote);
   wrapWidgetOptions(solarTermSection, 'solarTerm');
+  markAdminOnly(solarTermSection);
 
   const dailyAdviceSection = createSettingsSection('오늘의 한마디 설정');
   dailyAdviceSection.append(createSidebarWidgetCheckbox('dailyAdvice', '오늘의 한마디 위젯 표시'));
@@ -1385,6 +2145,7 @@ function setupSidebarSettingsPanel() {
   dailyAdviceNote.textContent = '오늘의 한마디를 좌측 바에 독립 카드로 표시합니다.';
   dailyAdviceSection.append(dailyAdviceNote);
   wrapWidgetOptions(dailyAdviceSection, 'dailyAdvice');
+  markAdminOnly(dailyAdviceSection);
 
   if (firstSection) {
     els.sidebarPanel.insertBefore(orderSection, firstSection);
@@ -1418,9 +2179,11 @@ function setupSidebarSettingsPanel() {
       trainSection.querySelector('h3')?.after(createSidebarWidgetCheckbox('trainSchedule', '열차 시간표 위젯 표시'));
     }
     wrapWidgetOptions(trainSection, 'trainSchedule');
+    markAdminOnly(trainSection);
   }
 
   els.sidebarPanel.dataset.widgetSettingsReady = 'true';
+  updateAdminOptionVisibility();
 }
 
 function collectSidebarWidgetsFromControls() {
@@ -1527,12 +2290,28 @@ function applySettingsToForm() {
   if (els.selectPopupMode) {
     els.selectPopupMode.value = popupMode === 'current' ? 'current' : 'allow';
   }
+  state.draftConfig.browser.autoRefresh = getDraftTrainInfoAutoRefreshSettings();
+  renderTrainInfoAutoRefreshStatus();
+  state.draftConfig.browser.dragReplay = getDraftDragReplaySettings();
+  renderDragReplayStatus();
   updatePopupModeVisibility();
   els.selectSplitRatio.value = state.draftConfig.layout.splitRatio;
   els.selectTransition.value = state.draftConfig.player.transition;
   els.checkSwap.checked = !!state.draftConfig.layout.panelSwapped;
   els.checkAlwaysOnTop.checked = !!state.draftConfig.window.alwaysOnTop;
   els.checkPreventMin.checked = !!state.draftConfig.window.preventMinimize;
+  if (els.checkAdminOptions) {
+    els.checkAdminOptions.checked = !!state.draftConfig.ui?.adminOptionsEnabled;
+  }
+  if (els.appVersionText) {
+    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.0.1'}`;
+  }
+  if (els.checkAutoStart) {
+    els.checkAutoStart.checked = !!state.draftConfig.window.autoStart;
+  }
+  if (els.checkStartFullscreen) {
+    els.checkStartFullscreen.checked = !!state.draftConfig.window.startFullscreen;
+  }
   if (els.inputSidebarWidth) {
     els.inputSidebarWidth.value = clampSidebarWidth(state.draftConfig.sidebar?.width);
   }
@@ -1567,7 +2346,93 @@ function applySettingsToForm() {
   applySidebarWidgets();
   updateStationDisplayName();
   renderTimetableSettingsStatus();
+  updateAdminOptionVisibility();
+  refreshStartupStatus().catch(() => {});
 
+}
+
+function renderStartupStatus(status = null) {
+  if (!els.startupStatus) {
+    return;
+  }
+
+  const desired = !!state.draftConfig?.window?.autoStart;
+  const saved = !!state.savedConfig?.window?.autoStart;
+  if (desired !== saved) {
+    els.startupStatus.textContent = desired
+      ? 'Windows 시작 프로그램: 저장 후 등록됩니다.'
+      : 'Windows 시작 프로그램: 저장 후 해제됩니다.';
+    return;
+  }
+
+  if (!status) {
+    els.startupStatus.textContent = 'Windows 시작 프로그램: 상태 확인 중';
+    return;
+  }
+
+  if (!status.supported) {
+    els.startupStatus.textContent = status.error
+      ? `Windows 시작 프로그램: 지원되지 않음 (${status.error})`
+      : 'Windows 시작 프로그램: 이 운영체제에서는 지원되지 않습니다.';
+    return;
+  }
+
+  if (status.timeout) {
+    els.startupStatus.textContent = 'Windows 시작 프로그램: 확인 시간이 초과되었습니다. 아래 버튼으로 직접 확인해 주세요.';
+    return;
+  }
+
+  if (status.error) {
+    els.startupStatus.textContent = `Windows 시작 프로그램: 확인 실패 (${status.error})`;
+    return;
+  }
+
+  if (status.openAtLogin) {
+    els.startupStatus.textContent = 'Windows 시작 프로그램: 등록됨';
+    return;
+  }
+
+  els.startupStatus.textContent = desired
+    ? 'Windows 시작 프로그램: 등록 확인 필요'
+    : 'Windows 시작 프로그램: 꺼짐';
+}
+
+function withTimeout(promise, timeoutMs, timeoutValue) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => {
+      setTimeout(() => resolve(timeoutValue), timeoutMs);
+    })
+  ]);
+}
+
+async function refreshStartupStatus() {
+  if (typeof window.desktopAPI.getAutoStartStatus !== 'function') {
+    renderStartupStatus({
+      supported: false,
+      desired: !!state.draftConfig?.window?.autoStart,
+      openAtLogin: false,
+      error: '상태 확인 API를 사용할 수 없습니다.'
+    });
+    return;
+  }
+
+  try {
+    const status = await withTimeout(
+      window.desktopAPI.getAutoStartStatus(),
+      STARTUP_STATUS_TIMEOUT_MS,
+      {
+        supported: true,
+        desired: !!state.draftConfig?.window?.autoStart,
+        openAtLogin: false,
+        timeout: true,
+        error: null
+      }
+    );
+    renderStartupStatus(status);
+  } catch (err) {
+    renderStartupStatus({ supported: true, desired: !!state.draftConfig?.window?.autoStart, openAtLogin: false, error: err.message });
+  }
 }
 
 function clampSidebarWidth(width) {
@@ -1586,7 +2451,7 @@ function setPanelVisible(panelEl, visible) {
 
 function toggleExclusivePanel(panelEl) {
   const shouldOpen = panelEl.classList.contains('hidden');
-  [els.sidebarPanel, els.filePanel, els.settingsPanel].forEach((panel) => {
+  [els.settingsPanel, els.sidebarPanel, els.trainInfoPanel, els.filePanel].forEach((panel) => {
     if (!panel) {
       return;
     }
@@ -1673,6 +2538,7 @@ function arrangeSidebarInfoCards() {
     range.className = 'weather-range-row';
     range.append(els.weatherLow, els.weatherHigh);
     weatherCard.append(range);
+    applyTemperatureDisplayOrder();
 
     const lifeSection = document.createElement('div');
     lifeSection.className = 'weather-life-section';
@@ -1700,6 +2566,7 @@ function openSettingsPanel() {
 
 function isAnyPanelOpen() {
   return !els.settingsPanel.classList.contains('hidden')
+    || !els.trainInfoPanel.classList.contains('hidden')
     || !els.filePanel.classList.contains('hidden')
     || !els.sidebarPanel.classList.contains('hidden');
 }
@@ -1715,14 +2582,16 @@ function renderPlaylist() {
     tr.dataset.index = String(index);
 
     const typeText = item.type === 'video' ? '동영상' : '이미지';
-    const warnText = item.missing ? '⚠ 누락' : '정상';
+    const publishState = getPlaylistItemPublishState(item);
 
     tr.innerHTML = `
       <td class="drag-handle">≡</td>
-      <td>${getFilename(item.path)}</td>
+      <td class="playlist-filename" title="${escapeHtml(getFilename(item.path))}">${escapeHtml(getFilename(item.path))}</td>
       <td>${typeText}</td>
       <td><input class="duration-input" type="number" min="1" value="${Number(item.duration) || 5}" ${item.type === 'video' ? 'disabled' : ''} /></td>
-      <td class="${item.missing ? 'warn' : ''}">${warnText}</td>
+      <td><input class="publish-date-input publish-start-input" type="date" value="${normalizePublishDate(item.publishStartDate)}" aria-label="게시 시작일" /></td>
+      <td><input class="publish-date-input publish-end-input" type="date" value="${normalizePublishDate(item.publishEndDate)}" aria-label="게시 종료일" /></td>
+      <td class="${publishState.className}">${publishState.label}</td>
       <td><button class="delete-btn">🗑</button></td>
     `;
 
@@ -1732,6 +2601,22 @@ function renderPlaylist() {
       state.draftConfig.player.playlist[index].duration = value;
       syncDraftState();
     });
+
+    const publishStartInput = tr.querySelector('.publish-start-input');
+    const publishEndInput = tr.querySelector('.publish-end-input');
+    const updatePublishDates = () => {
+      const target = state.draftConfig.player.playlist[index];
+      if (!target) {
+        return;
+      }
+      target.publishStartDate = normalizePublishDate(publishStartInput.value);
+      target.publishEndDate = normalizePublishDate(publishEndInput.value);
+      renderPlaylist();
+      showSlide(state.currentIndex, { force: true });
+      syncDraftState();
+    };
+    publishStartInput.addEventListener('change', updatePublishDates);
+    publishEndInput.addEventListener('change', updatePublishDates);
 
     tr.querySelector('.delete-btn').addEventListener('click', () => {
       state.draftConfig.player.playlist.splice(index, 1);
@@ -1796,6 +2681,8 @@ async function saveSettingsToDisk() {
   updateStationDisplayName();
   applyBrowserSettings();
   applySettingsToForm();
+  await refreshStartupStatus();
+  scheduleTrainInfoAutoRefresh();
   renderPlaylist();
   showSlide(state.currentIndex);
   updateBackgroundWidgetTasks();
@@ -1807,9 +2694,49 @@ function applyDraftConfigToUI({ firstSlide = false } = {}) {
   applySidebarLogo();
   applyBrowserSettings();
   applySettingsToForm();
+  scheduleTrainInfoAutoRefresh();
   updateBackgroundWidgetTasks();
   renderPlaylist();
   showSlide(firstSlide ? 0 : state.currentIndex);
+}
+
+function createDefaultConfigForReset() {
+  const nextConfig = deepClone(defaultConfig);
+  const dragDefault = getDraftDragReplayDefaultGesture();
+  nextConfig.browser = {
+    ...nextConfig.browser,
+    dragReplay: normalizeDragReplaySettings({
+      ...(nextConfig.browser?.dragReplay || {}),
+      gesture: dragDefault,
+      defaultGesture: dragDefault
+    })
+  };
+  return nextConfig;
+}
+
+function resetGeneralSettingsToDefaults() {
+  const defaults = createDefaultConfigForReset();
+  state.draftConfig.layout = deepClone(defaults.layout);
+  state.draftConfig.window = normalizeWindowSettings(defaults.window);
+  state.draftConfig.ui = normalizeUiSettings(defaults.ui);
+}
+
+function resetTrainInfoSettingsToDefaults() {
+  const defaults = createDefaultConfigForReset();
+  state.draftConfig.browser = {
+    ...deepClone(defaults.browser),
+    dragReplay: normalizeDragReplaySettings(defaults.browser.dragReplay),
+    autoRefresh: normalizeTrainInfoAutoRefreshSettings(defaults.browser.autoRefresh)
+  };
+}
+
+function resetNoticeSettingsToDefaults() {
+  const defaults = createDefaultConfigForReset();
+  state.currentIndex = 0;
+  state.draftConfig.player = {
+    transition: normalizeTransition(defaults.player?.transition),
+    playlist: []
+  };
 }
 
 function mergeUIState(oldConfig, newConfig) {
@@ -1826,12 +2753,16 @@ function mergeUIState(oldConfig, newConfig) {
     browser: {
       url: normalizeUrl(browserConfig.url || defaultConfig.browser.url),
       popupMode: ['block', 'allow', 'current'].includes(browserConfig.popupMode) ? browserConfig.popupMode : defaultConfig.browser.popupMode,
-      zoomPercent: normalizeZoomPercent(browserConfig.zoomPercent)
+      zoomPercent: normalizeZoomPercent(browserConfig.zoomPercent),
+      dragReplay: normalizeDragReplaySettings(browserConfig.dragReplay),
+      autoRefresh: normalizeTrainInfoAutoRefreshSettings(browserConfig.autoRefresh)
     },
     layout: {
       ...deepClone(newConfig.layout),
       borderEnabled: false
     },
+    window: normalizeWindowSettings(newConfig.window),
+    ui: normalizeUiSettings(newConfig.ui),
     sidebar: {
       ...defaultConfig.sidebar,
       ...(newConfig.sidebar || {}),
@@ -1858,12 +2789,26 @@ function bindSettingsForm() {
     state.draftConfig.browser.popupMode = els.checkBlockPopups?.checked
       ? 'block'
       : (els.selectPopupMode?.value === 'current' ? 'current' : 'allow');
+    setDraftTrainInfoAutoRefreshSettings({
+      enabled: !!els.checkTrainAutoRefreshEnabled?.checked,
+      intervalHours: els.inputTrainAutoRefreshHours?.value
+    });
+    setDraftDragReplaySettings({ enabled: !!els.checkDragReplayEnabled?.checked });
     state.draftConfig.layout.splitRatio = els.selectSplitRatio.value;
     state.draftConfig.layout.borderEnabled = false;
     state.draftConfig.layout.panelSwapped = els.checkSwap.checked;
     state.draftConfig.player.transition = normalizeTransition(els.selectTransition.value);
-    state.draftConfig.window.alwaysOnTop = els.checkAlwaysOnTop.checked;
-    state.draftConfig.window.preventMinimize = els.checkPreventMin.checked;
+    state.draftConfig.ui = normalizeUiSettings({
+      ...(state.draftConfig.ui || {}),
+      adminOptionsEnabled: els.checkAdminOptions ? els.checkAdminOptions.checked : state.draftConfig.ui?.adminOptionsEnabled
+    });
+    state.draftConfig.window = normalizeWindowSettings({
+      ...(state.draftConfig.window || {}),
+      alwaysOnTop: els.checkAlwaysOnTop.checked,
+      preventMinimize: els.checkPreventMin.checked,
+      autoStart: els.checkAutoStart ? els.checkAutoStart.checked : state.draftConfig.window?.autoStart,
+      startFullscreen: els.checkStartFullscreen ? els.checkStartFullscreen.checked : state.draftConfig.window?.startFullscreen
+    });
     state.draftConfig.sidebar = {
       ...(state.draftConfig.sidebar || {}),
       width: clampSidebarWidth(els.inputSidebarWidth?.value),
@@ -1874,7 +2819,11 @@ function bindSettingsForm() {
     applySidebarLogo();
     applyBrowserZoom();
     syncWebviewPopupPermission();
+    scheduleTrainInfoAutoRefresh();
+    renderDragReplayStatus();
     updatePopupModeVisibility();
+    renderStartupStatus();
+    updateAdminOptionVisibility();
     if (nextUrl !== previousUrl) {
       applyBrowserSettings();
     } else {
@@ -1891,17 +2840,63 @@ function bindSettingsForm() {
     els.inputZoomPercent,
     els.checkBlockPopups,
     els.selectPopupMode,
+    els.checkTrainAutoRefreshEnabled,
+    els.inputTrainAutoRefreshHours,
+    els.checkDragReplayEnabled,
+    els.checkAdminOptions,
     els.selectSplitRatio,
     els.selectTransition,
     els.checkSwap,
     els.checkAlwaysOnTop,
     els.checkPreventMin,
+    els.checkAutoStart,
+    els.checkStartFullscreen,
     els.inputSidebarWidth,
     els.inputLogoPath
   ].forEach((input) => {
     if (!input) return;
     input.addEventListener('change', update);
     input.addEventListener('blur', update);
+  });
+
+  els.btnStartDragRecord?.addEventListener('click', () => {
+    startDragReplayRecording();
+  });
+
+  els.btnClearDragRecord?.addEventListener('click', async () => {
+    if (state.dragRecordInProgress) {
+      await stopDragReplayRecording('드래그 녹화를 중단하고 기본값으로 되돌렸습니다.');
+    }
+    setDraftDragReplaySettings({ gesture: getDraftDragReplayDefaultGesture() });
+    renderDragReplayStatus('드래그 녹화를 삭제하고 기본값으로 되돌렸습니다.');
+    await syncDraftState();
+  });
+
+  els.btnSaveDragReplayDefault?.addEventListener('click', async () => {
+    const gesture = readDragReplayGestureFromInputs() || getDraftDragReplaySettings().gesture;
+    if (!gesture) {
+      renderDragReplayStatus('저장할 드래그 보정값이 없습니다.');
+      return;
+    }
+    setDraftDragReplaySettings({ gesture, defaultGesture: gesture });
+    renderDragReplayStatus('드래그 보정 기본값이 저장되었습니다.');
+    showStatusOverride('드래그 보정 기본값이 저장되었습니다.');
+    await saveSettingsToDisk();
+    await syncDraftState();
+  });
+
+  [
+    els.inputDragStartXPercent,
+    els.inputDragStartYPercent,
+    els.inputDragEndXPercent,
+    els.inputDragEndYPercent,
+    els.inputDragDurationMs
+  ].forEach((input) => {
+    if (!input) {
+      return;
+    }
+    input.addEventListener('change', updateDragReplayGestureFromInputs);
+    input.addEventListener('blur', updateDragReplayGestureFromInputs);
   });
 }
 
@@ -1944,6 +2939,12 @@ function bindToolbarAndPanels() {
   els.btnSidebarSettings.addEventListener('click', () => {
     toggleExclusivePanel(els.sidebarPanel);
     renderTimetableSettingsStatus();
+    updateAdminOptionVisibility();
+  });
+
+  els.btnTrainInfoSettings?.addEventListener('click', () => {
+    toggleExclusivePanel(els.trainInfoPanel);
+    renderDragReplayStatus();
   });
 
   els.btnFileManager.addEventListener('click', () => {
@@ -1952,6 +2953,7 @@ function bindToolbarAndPanels() {
 
   els.btnScreenSettings.addEventListener('click', () => {
     toggleExclusivePanel(els.settingsPanel);
+    updateAdminOptionVisibility();
   });
 
   els.btnPickLogoFile?.addEventListener('click', async () => {
@@ -2014,6 +3016,47 @@ function bindToolbarAndPanels() {
     setPanelVisible(els.settingsPanel, false);
   });
 
+  els.btnOpenStartupFolder?.addEventListener('click', async () => {
+    if (typeof window.desktopAPI.openStartupFolder !== 'function') {
+      els.startupStatus.textContent = 'Windows 시작 프로그램: 폴더 열기 기능을 사용할 수 없습니다.';
+      return;
+    }
+    els.startupStatus.textContent = 'Windows 시작 프로그램: 시작프로그램 폴더를 여는 중';
+    try {
+      const result = await window.desktopAPI.openStartupFolder();
+      els.startupStatus.textContent = result?.ok
+        ? 'Windows 시작 프로그램: 시작프로그램 폴더를 열었습니다.'
+        : `Windows 시작 프로그램: 폴더 열기 실패 (${result?.error || '알 수 없는 오류'})`;
+    } catch (err) {
+      els.startupStatus.textContent = `Windows 시작 프로그램: 폴더 열기 실패 (${err.message || err})`;
+    }
+  });
+
+  els.btnOpenStartupSettings?.addEventListener('click', async () => {
+    if (typeof window.desktopAPI.openWindowsStartupSettings !== 'function') {
+      els.startupStatus.textContent = 'Windows 시작 프로그램: 설정 창 열기 기능을 사용할 수 없습니다.';
+      return;
+    }
+    els.startupStatus.textContent = 'Windows 시작 프로그램: Windows 설정 창을 여는 중';
+    try {
+      const result = await window.desktopAPI.openWindowsStartupSettings();
+      els.startupStatus.textContent = result?.ok
+        ? 'Windows 시작 프로그램: Windows 시작프로그램 설정 창을 열었습니다.'
+        : `Windows 시작 프로그램: 설정 창 열기 실패 (${result?.error || '알 수 없는 오류'})`;
+    } catch (err) {
+      els.startupStatus.textContent = `Windows 시작 프로그램: 설정 창 열기 실패 (${err.message || err})`;
+    }
+  });
+
+  els.btnCloseTrainInfoPanel?.addEventListener('click', () => {
+    setPanelVisible(els.trainInfoPanel, false);
+  });
+
+  els.btnSaveTrainInfoSettings?.addEventListener('click', async () => {
+    await saveSettingsToDisk();
+    setPanelVisible(els.trainInfoPanel, false);
+  });
+
   els.btnCancelSettings.addEventListener('click', async () => {
     state.draftConfig = mergeUIState(state.draftConfig, deepClone(state.savedConfig));
     applyDraftConfigToUI();
@@ -2021,19 +3064,31 @@ function bindToolbarAndPanels() {
     setPanelVisible(els.settingsPanel, false);
   });
 
-  els.btnResetDefaults.addEventListener('click', async () => {
-    state.draftConfig = mergeUIState(state.draftConfig, deepClone(defaultConfig));
+  els.btnResetGeneralSettings?.addEventListener('click', async () => {
+    resetGeneralSettingsToDefaults();
+    applyDraftConfigToUI();
+    await syncDraftState();
+  });
+
+  els.btnResetTrainInfoSettings?.addEventListener('click', async () => {
+    resetTrainInfoSettingsToDefaults();
+    applyDraftConfigToUI();
+    await syncDraftState();
+  });
+
+  els.btnResetNoticeSettings?.addEventListener('click', async () => {
+    resetNoticeSettingsToDefaults();
     applyDraftConfigToUI({ firstSlide: true });
     await syncDraftState();
   });
 
-  els.btnResetAppDefaults?.addEventListener('click', async () => {
-    const ok = window.confirm('앱 전체 설정을 기본값으로 초기화할까요? 화면 설정, 좌측 바 설정, 재생 목록이 모두 기본값으로 저장됩니다.');
+  els.btnResetAllDefaults?.addEventListener('click', async () => {
+    const ok = window.confirm('프로그램 전체 설정을 기본값으로 초기화할까요? 일반 설정, 위젯, 열차 위치 정보, 공지 설정이 모두 기본값으로 저장됩니다.');
     if (!ok) {
       return;
     }
     state.currentIndex = 0;
-    state.draftConfig = mergeUIState(state.draftConfig, deepClone(defaultConfig));
+    state.draftConfig = mergeUIState(state.draftConfig, createDefaultConfigForReset());
     await saveSettingsToDisk();
   });
 
@@ -2050,6 +3105,8 @@ function bindToolbarAndPanels() {
         path: filePath,
         type: isVideo ? 'video' : 'image',
         duration: isVideo ? 30 : 5,
+        publishStartDate: '',
+        publishEndDate: '',
         missing: false
       };
       state.draftConfig.player.playlist.push(item);
@@ -2310,7 +3367,10 @@ function updateToolbarVisibility() {
 
 function updateFullscreenButtonText() {
   if (els.btnFullscreen) {
-    els.btnFullscreen.textContent = state.isFullscreen ? '현시 모드 종료' : '현시 모드 시작';
+    const label = state.isFullscreen ? '사이니지 모드 종료' : '사이니지 모드 시작';
+    els.btnFullscreen.textContent = label;
+    els.btnFullscreen.title = label;
+    els.btnFullscreen.setAttribute('aria-label', label);
   }
 }
 
@@ -2945,21 +4005,43 @@ function fitMultiInfoAdviceLayout() {
   const message = widget?.querySelector('.multi-info-advice-message');
   const author = widget?.querySelector('.multi-info-advice-author');
   const profile = widget?.querySelector('.multi-info-advice-author-profile');
-  if (!widget || !message || !author) {
+  if (!widget || !message) {
     return;
   }
 
+  widget.classList.remove('message-only');
+  message.style.removeProperty('font-size');
+  author?.classList.remove('hidden');
+  profile?.classList.remove('hidden');
+
+  const messageClipped = () => message.scrollHeight > message.clientHeight + 1;
+  const authorClipped = () => !!author
+    && !author.classList.contains('hidden')
+    && (author.scrollWidth > author.clientWidth + 1 || author.scrollHeight > author.clientHeight + 1);
   const overflows = () => widget.scrollHeight > widget.clientHeight + 1
-    || message.scrollHeight > message.clientHeight + 1
-    || author.scrollWidth > author.clientWidth + 1
-    || author.scrollHeight > author.clientHeight + 1;
+    || messageClipped()
+    || authorClipped();
+  const shrinkMessageToFit = () => {
+    let fontSize = Number.parseFloat(getComputedStyle(message).fontSize);
+    if (!Number.isFinite(fontSize) || fontSize <= 0) {
+      fontSize = 22;
+    }
+
+    while (overflows() && fontSize > 15) {
+      fontSize -= 1;
+      message.style.fontSize = `${fontSize}px`;
+    }
+  };
 
   if (profile && overflows()) {
     profile.classList.add('hidden');
   }
-  if (overflows()) {
+  if (author && overflows()) {
     author.classList.add('hidden');
     widget.classList.add('message-only');
+  }
+  if (overflows()) {
+    shrinkMessageToFit();
   }
 }
 
@@ -3376,6 +4458,25 @@ function renderAirQuality(currentAir = {}) {
   els.weatherAirQuality.textContent = airQuality.representative;
 }
 
+function getTemperatureDisplayOrder(month = new Date().getMonth() + 1) {
+  // Warm months prioritize the day's high first; cold months put the low first for morning/freeze checks.
+  const normalizedMonth = Number.parseInt(month, 10);
+  return normalizedMonth >= 4 && normalizedMonth <= 10
+    ? ['high', 'low']
+    : ['low', 'high'];
+}
+
+function applyTemperatureDisplayOrder(month = new Date().getMonth() + 1) {
+  const range = els.weatherHigh?.parentElement;
+  if (!range || !els.weatherHigh || !els.weatherLow) {
+    return;
+  }
+
+  getTemperatureDisplayOrder(month).forEach((key) => {
+    range.append(key === 'high' ? els.weatherHigh : els.weatherLow);
+  });
+}
+
 async function updateWeather() {
   if (!isSidebarWidgetVisible('weather')) {
     return;
@@ -3418,6 +4519,7 @@ async function updateWeather() {
     renderAirQuality(air.current);
     els.weatherHigh.textContent = `\uCD5C\uACE0 ${Math.round(Number(daily.temperature_2m_max?.[0]))}\u00B0`;
     els.weatherLow.textContent = `\uCD5C\uC800 ${Math.round(Number(daily.temperature_2m_min?.[0]))}\u00B0`;
+    applyTemperatureDisplayOrder(now.getMonth() + 1);
     els.weatherSunTime.textContent = formatHourMinute(sunValue);
     els.weatherPrecip.textContent = `${Number.isFinite(Number(precip)) ? Math.round(Number(precip)) : 0}%`;
     state.weatherLastUpdatedAt = new Date().toISOString();
@@ -3463,6 +4565,16 @@ function updateBackgroundWidgetTasks({ forceWeather = false } = {}) {
   updateStatusToast();
 }
 
+function renderClockHour(hour) {
+  const normalizedHour = Math.min(12, Math.max(1, Number.parseInt(hour, 10) || 12));
+  const text = String(normalizedHour).padStart(2, '0');
+  const hideLeadingZero = normalizedHour < 10;
+  return `
+        <span class="clock-hour-digit clock-hour-tens ${hideLeadingZero ? 'clock-hidden-leading-zero' : ''}">${text[0]}</span>
+        <span class="clock-hour-digit clock-hour-ones">${text[1]}</span>
+      `;
+}
+
 function updateClock() {
   if (!isSidebarWidgetVisible('datetime')) {
     return;
@@ -3474,8 +4586,8 @@ function updateClock() {
   const dayNames = ['\uC77C\uC694\uC77C', '\uC6D4\uC694\uC77C', '\uD654\uC694\uC77C', '\uC218\uC694\uC77C', '\uBAA9\uC694\uC77C', '\uAE08\uC694\uC77C', '\uD1A0\uC694\uC77C'];
   const day = dayNames[now.getDay()];
   const rawHours = now.getHours();
+  const displayHour = rawHours % 12 || 12;
   const period = rawHours >= 12 ? '\uC624\uD6C4' : '\uC624\uC804';
-  const hours12 = rawHours % 12 || 12;
   const minutes = String(now.getMinutes()).padStart(2, '0');
   const seconds = String(now.getSeconds()).padStart(2, '0');
 
@@ -3486,7 +4598,7 @@ function updateClock() {
     els.sidebarClock.innerHTML = `
       <span class="sidebar-clock-period">${period}</span>
       <span class="sidebar-clock-time">
-        <span class="clock-unit">${String(hours12).padStart(2, '0')}</span>
+        <span class="clock-unit clock-hour">${renderClockHour(displayHour)}</span>
         <span class="clock-separator">:</span>
         <span class="clock-unit">${minutes}</span>
         <span class="clock-separator">:</span>
@@ -3517,12 +4629,19 @@ arrangeSidebarInfoCards();
 syncClockUpdates();
 
 async function init() {
+  document.title = KOREAN_APP_NAME;
   if (typeof window.desktopAPI.getDefaultConfig === 'function') {
     defaultConfig = await window.desktopAPI.getDefaultConfig();
+  }
+  if (typeof window.desktopAPI.getAppVersion === 'function') {
+    state.appVersion = await window.desktopAPI.getAppVersion();
   }
   const config = await window.desktopAPI.getConfig();
   state.savedConfig = deepClone(config);
   state.draftConfig = mergeUIState(state.savedConfig, config);
+  if (els.toolbarTitle && state.appVersion) {
+    els.toolbarTitle.textContent = `${KOREAN_APP_NAME} (v${state.appVersion})`;
+  }
 
   setupSidebarSettingsPanel();
   bindToolbarAndPanels();
@@ -3543,6 +4662,7 @@ async function init() {
   applyBrowserSettings();
   logSmssLayoutState('init');
   applySettingsToForm();
+  scheduleTrainInfoAutoRefresh();
   renderPlaylist();
   updateBackgroundWidgetTasks();
   updateStatusToast();

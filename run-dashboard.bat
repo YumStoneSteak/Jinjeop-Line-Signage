@@ -23,10 +23,10 @@ if not exist "node_modules\electron\dist\electron.exe" (
   if errorlevel 1 exit /b 1
 )
 
-echo Starting dashboard app...
+echo Starting Jinjeop Line Signage...
 call npm run start
 if errorlevel 1 (
-  echo [ERROR] Dashboard app failed to start.
+  echo [ERROR] Jinjeop Line Signage failed to start.
   pause
   exit /b 1
 )

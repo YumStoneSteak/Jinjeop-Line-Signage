@@ -4,13 +4,13 @@
     <meta charset="UTF-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Split Display Dashboard</title>
+    <title>진접선 행선안내 사이니지</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div id="topHoverZone"></div>
 
-    <aside id="fullscreenSidebar" class="fullscreen-sidebar" aria-label="Fullscreen dashboard sidebar">
+    <aside id="fullscreenSidebar" class="fullscreen-sidebar" aria-label="사이니지 좌측 정보 영역">
       <div class="sidebar-logo-slot">
         <img id="sidebarLogoImage" src="../files/logos/ncuc_logo.png" alt="Company Logo" onerror="this.style.display='none'" />
       </div>
@@ -109,16 +109,33 @@
     <div id="weatherUpdateStatus" class="weather-update-status">날씨 업데이트 대기 중</div>
 
     <header id="toolbar">
-      <div class="toolbar-title">남양주도시공사 진접선 열차 행선안내 현시 (v1.1.0)</div>
+      <div id="toolbarTitle" class="toolbar-title">진접선 행선안내 사이니지 (v2.0.1)</div>
       <div class="toolbar-actions">
-        <button id="btnSidebarSettings">위젯 설정</button>
-        <button id="btnScreenSettings">화면 설정</button>
-        <button id="btnFileManager">공지 파일 관리</button>
-        <button id="btnFullscreen">현시 모드 시작</button>
+        <button id="btnScreenSettings" type="button" title="일반 설정" aria-label="일반 설정">일반 설정</button>
+        <button id="btnSidebarSettings" type="button" title="위젯" aria-label="위젯">위젯</button>
+        <button id="btnTrainInfoSettings" type="button" title="열차 위치 정보" aria-label="열차 위치 정보">열차 위치 정보</button>
+        <button id="btnFileManager" type="button" title="공지" aria-label="공지">공지</button>
+        <button id="btnFullscreen" type="button" title="사이니지 모드 시작" aria-label="사이니지 모드 시작">사이니지 모드 시작</button>
         <div class="window-controls" aria-label="창 제어">
-          <button id="btnWindowMinimize" class="window-control" type="button">최소화</button>
-          <button id="btnWindowMaximize" class="window-control" type="button">전체화면</button>
-          <button id="btnWindowClose" class="window-control close" type="button">종료</button>
+          <button id="btnWindowMinimize" class="window-control icon-only" type="button" title="최소화" aria-label="최소화">
+            <svg class="window-control-icon" aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M6 12h12" />
+            </svg>
+          </button>
+          <button id="btnWindowMaximize" class="window-control icon-only" type="button" title="전체 화면" aria-label="전체 화면">
+            <svg class="window-control-icon" aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+              <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+              <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+              <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+            </svg>
+          </button>
+          <button id="btnWindowClose" class="window-control icon-only close" type="button" title="종료" aria-label="종료">
+            <svg class="window-control-icon" aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
         </div>
       </div>
     </header>
@@ -149,14 +166,25 @@
     </main>
 
     <aside id="filePanel" class="side-panel hidden">
-      <h2>공지 파일 관리</h2>
+      <h2>공지</h2>
       <section class="settings-section">
         <h3>파일 작업</h3>
         <div class="panel-buttons">
           <button id="btnAddFiles">파일 추가</button>
           <button id="btnCheckMissing">누락 파일 확인</button>
-          <button id="btnResetAppDefaults" class="danger" type="button">앱 전체 초기화</button>
-          <button id="btnCloseFilePanel">닫기</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>공지 재생</h3>
+        <div class="form-grid">
+          <label>전환 효과
+            <select id="selectTransition">
+              <option value="none">None</option>
+              <option value="fade">Fade In/Out</option>
+              <option value="slide">Slide</option>
+            </select>
+          </label>
         </div>
       </section>
 
@@ -169,6 +197,8 @@
               <th>파일명</th>
               <th>유형</th>
               <th>재생시간(초)</th>
+              <th>게시 시작일</th>
+              <th>게시 종료일</th>
               <th>상태</th>
               <th>삭제</th>
             </tr>
@@ -177,10 +207,15 @@
         </table>
         <p class="hint">행의 좌측 핸들(≡)을 드래그하여 순서를 변경할 수 있습니다.</p>
       </section>
+
+      <div class="panel-buttons panel-footer-buttons">
+        <button id="btnResetNoticeSettings" type="button">공지 설정 초기화</button>
+        <button id="btnCloseFilePanel">닫기</button>
+      </div>
     </aside>
 
     <aside id="sidebarPanel" class="side-panel hidden">
-      <h2>위젯 설정</h2>
+      <h2>위젯</h2>
 
       <section class="settings-section">
         <h3>날씨 위젯</h3>
@@ -231,39 +266,18 @@
 
       <div class="panel-buttons">
         <button id="btnSaveSidebarSettings">저장</button>
-        <button id="btnResetSidebarDefaults" type="button">기본값으로 초기화</button>
+        <button id="btnResetSidebarDefaults" type="button">위젯 설정 초기화</button>
         <button id="btnCloseSidebarPanel">닫기</button>
       </div>
     </aside>
 
     <aside id="settingsPanel" class="side-panel hidden">
-      <h2>화면 설정</h2>
-      <section class="settings-section">
-        <h3>웹 화면</h3>
-        <div class="form-grid">
-          <label>시작 URL
-            <input id="inputUrl" type="text" placeholder="https://smss.seoulmetro.co.kr/traininfo/traininfoUserView.do" />
-          </label>
-
-          <label>기본 웹 확대/축소(%)
-            <input id="inputZoomPercent" type="number" min="25" max="300" step="5" />
-          </label>
-
-          <label class="checkbox-row"><input id="checkBlockPopups" type="checkbox" checked /> 웹사이트 팝업 금지</label>
-
-          <label id="popupModeDetail" class="popup-mode-detail">팝업 허용 시 처리 방식
-            <select id="selectPopupMode">
-              <option value="allow">별도 창으로 열기</option>
-              <option value="current">현재 뷰에서 열기</option>
-            </select>
-          </label>
-        </div>
-      </section>
+      <h2>일반 설정</h2>
 
       <section class="settings-section">
         <h3>레이아웃</h3>
         <div class="form-grid">
-          <label>분할 비율(프리셋)
+          <label>분할 비율
             <select id="selectSplitRatio">
               <option value="5:5">5:5</option>
               <option value="6:4">6:4</option>
@@ -274,19 +288,6 @@
           </label>
 
           <label class="checkbox-row"><input id="checkSwap" type="checkbox" /> 패널 좌우 전환</label>
-        </div>
-      </section>
-
-      <section class="settings-section">
-        <h3>공지 재생</h3>
-        <div class="form-grid">
-          <label>전환 효과
-            <select id="selectTransition">
-              <option value="none">None</option>
-              <option value="fade">Fade In/Out</option>
-              <option value="slide">Slide</option>
-            </select>
-          </label>
         </div>
       </section>
 
@@ -313,14 +314,108 @@
               data-tooltip="실수로 창이 최소화되지 않도록 최소화 동작을 막습니다."
             >?</span>
           </label>
+          <label class="checkbox-row wide-field">
+            <input id="checkStartFullscreen" type="checkbox" />
+            <span>앱 시작 시 전체 화면 모드</span>
+          </label>
+          <label class="checkbox-row wide-field">
+            <input id="checkAutoStart" type="checkbox" />
+            <span>Windows 시작 시 자동 실행</span>
+          </label>
+          <p id="startupStatus" class="settings-note wide-field">Windows 시작 프로그램: 상태 확인 중</p>
+          <div class="panel-buttons startup-action-buttons wide-field">
+            <button id="btnOpenStartupFolder" type="button">시작프로그램 폴더 열기</button>
+            <button id="btnOpenStartupSettings" type="button">윈도우 시작프로그램 설정 창 열기</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>관리</h3>
+        <div class="form-grid">
+          <label class="checkbox-row wide-field admin-option-row" data-tooltip="제작: 철도지원부 이동혁 대리. 2026. 4. 24." aria-label="관리자 옵션. 제작: 철도지원부 이동혁 대리. 2026. 4. 24.">
+            <input id="checkAdminOptions" type="checkbox" />
+            <span>관리자 옵션</span>
+          </label>
+          <p class="settings-note wide-field">불필요 옵션이 표시됩니다.</p>
+          <p id="appVersionText" class="settings-note wide-field">현재 버전: v2.0.1</p>
         </div>
       </section>
 
       <div class="panel-buttons">
         <button id="btnSaveSettings">저장</button>
         <button id="btnCancelSettings">취소</button>
-        <button id="btnResetDefaults">기본값으로 초기화</button>
+        <button id="btnResetGeneralSettings" type="button">일반 설정 초기화</button>
+        <button id="btnResetAllDefaults" class="danger" type="button">기본값으로 전체 초기화</button>
         <button id="btnCloseSettings">닫기</button>
+      </div>
+    </aside>
+
+    <aside id="trainInfoPanel" class="side-panel hidden">
+      <h2>열차 위치 정보</h2>
+
+      <section class="settings-section">
+        <h3>열차 위치 정보</h3>
+        <div class="form-grid">
+          <label>시작 URL
+            <input id="inputUrl" type="text" placeholder="https://smss.seoulmetro.co.kr/traininfo/traininfoUserView.do" />
+          </label>
+
+          <label>기본 웹 확대/축소(%)
+            <input id="inputZoomPercent" type="number" min="25" max="300" step="5" />
+          </label>
+
+          <label class="checkbox-row wide-field"><input id="checkTrainAutoRefreshEnabled" type="checkbox" /> 자동 새로고침 사용</label>
+
+          <label>자동 새로고침 주기(시간)
+            <input id="inputTrainAutoRefreshHours" type="number" min="1" max="168" step="0.5" />
+          </label>
+
+          <p id="trainAutoRefreshStatus" class="settings-note wide-field">자동 새로고침: 6시간마다 실행</p>
+
+          <label class="checkbox-row"><input id="checkBlockPopups" type="checkbox" checked /> 웹사이트 팝업 금지</label>
+
+          <label id="popupModeDetail" class="popup-mode-detail">팝업 허용 시 처리 방식
+            <select id="selectPopupMode">
+              <option value="allow">별도 창으로 열기</option>
+              <option value="current">현재 뷰에서 열기</option>
+            </select>
+          </label>
+
+          <label class="checkbox-row wide-field"><input id="checkDragReplayEnabled" type="checkbox" /> 새로고침 후 드래그 보정 사용</label>
+
+          <div class="wide-field drag-replay-controls">
+            <div class="drag-replay-buttons">
+              <button id="btnStartDragRecord" type="button">드래그 녹화 시작</button>
+              <button id="btnClearDragRecord" type="button">녹화 삭제</button>
+              <button id="btnSaveDragReplayDefault" type="button">기본값으로 저장</button>
+            </div>
+            <div class="drag-replay-fields">
+              <label>시작 X(%)
+                <input id="inputDragStartXPercent" type="number" min="0" max="100" step="0.1" />
+              </label>
+              <label>시작 Y(%)
+                <input id="inputDragStartYPercent" type="number" min="0" max="100" step="0.1" />
+              </label>
+              <label>끝 X(%)
+                <input id="inputDragEndXPercent" type="number" min="0" max="100" step="0.1" />
+              </label>
+              <label>끝 Y(%)
+                <input id="inputDragEndYPercent" type="number" min="0" max="100" step="0.1" />
+              </label>
+              <label>시간(ms)
+                <input id="inputDragDurationMs" type="number" min="120" max="5000" step="10" />
+              </label>
+            </div>
+            <p id="dragReplayStatus" class="settings-note">드래그 보정: 기본값 사용 중</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="panel-buttons">
+        <button id="btnSaveTrainInfoSettings">저장</button>
+        <button id="btnResetTrainInfoSettings" type="button">열차 위치 정보 설정 초기화</button>
+        <button id="btnCloseTrainInfoPanel">닫기</button>
       </div>
     </aside>
 
