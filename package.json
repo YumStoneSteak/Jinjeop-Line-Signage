@@ -1,6 +1,6 @@
 {
   "name": "jinjeop-line-signage",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Jinjeop Line Signage Electron app",
   "main": "main.js",
   "scripts": {
@@ -8,20 +8,20 @@
     "start:local": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\run-dashboard-local.ps1",
     "prepare:local": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\run-dashboard-local.ps1 -NoLaunch",
     "watchdog": "node launcher.js",
-    "build": "electron-builder --win"
+    "build": "electron-builder --win nsis",
+    "build:nsis": "electron-builder --win nsis"
   },
   "build": {
     "appId": "kr.or.ncuc.jinjeop-line-signage",
     "productName": "Jinjeop Line Signage",
-    "artifactName": "${productName} ${version}.${ext}",
+    "artifactName": "${productName} Setup ${version}.${ext}",
     "icon": "files/icons/ncuc.ico",
     "win": {
       "icon": "files/icons/ncuc.ico",
       "executableName": "Jinjeop Line Signage",
       "signAndEditExecutable": false,
       "target": [
-        "nsis",
-        "portable"
+        "nsis"
       ]
     },
     "nsis": {
@@ -29,6 +29,14 @@
       "allowToChangeInstallationDirectory": true,
       "shortcutName": "Jinjeop Line Signage"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "YumStoneSteak",
+        "repo": "Jinjeop-Line-Signage",
+        "releaseType": "release"
+      }
+    ],
     "extraFiles": [
       {
         "from": "files",

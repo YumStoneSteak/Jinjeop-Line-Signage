@@ -2304,7 +2304,7 @@ function applySettingsToForm() {
     els.checkAdminOptions.checked = !!state.draftConfig.ui?.adminOptionsEnabled;
   }
   if (els.appVersionText) {
-    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.0.1'}`;
+    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.0.2'}`;
   }
   if (els.checkAutoStart) {
     els.checkAutoStart.checked = !!state.draftConfig.window.autoStart;

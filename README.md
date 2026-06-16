@@ -6,10 +6,13 @@
 
 ## 현재 버전
 
-v2.0.1
+v2.0.2
 
-## v2.0.1 주요 내용
+## v2.0.2 주요 내용
 
+- v2.0.1 빌드에서 NSIS 설치형과 portable 실행 파일이 같은 이름으로 생성되어 서로 덮어쓰던 문제를 수정했습니다.
+- Windows 릴리즈 빌드는 NSIS 설치형만 생성하도록 정리했습니다.
+- GitHub Releases 기반 자동 업데이트를 준비할 수 있도록 설치형 파일, blockmap, `latest.yml` 메타데이터가 일치하는 구조로 변경했습니다.
 - Windows 시작 시 자동 실행과 앱 시작 시 전체 화면 모드를 기본값으로 사용합니다.
 - 자동 실행 상태 확인, 시작프로그램 폴더 열기, Windows 시작프로그램 설정 열기 기능을 제공합니다.
 - 기본 웹 확대율을 125%로 통일했습니다. 내부 값이 `1.25` 또는 `125`로 저장되어 있어도 정상 인식합니다.
@@ -53,26 +56,28 @@ npm start
 
 `run-dashboard.bat`는 필요한 의존성이 없으면 설치 안내를 표시하고, 준비가 끝나면 앱을 실행합니다.
 
+GitHub 릴리즈에서 받은 설치형 파일을 사용하는 경우에는 `Jinjeop Line Signage Setup 2.0.2.exe`를 실행해 설치한 뒤 시작 메뉴 또는 바탕화면 바로가기로 실행합니다.
+
 ## Windows 빌드
 
-전체 Windows 빌드는 다음 명령으로 실행합니다.
+NSIS 설치형 Windows 빌드는 다음 명령으로 실행합니다.
 
 ```powershell
 npm run build
 ```
 
-빌드 결과는 `dist` 폴더에 생성됩니다.
-
-portable 실행 파일만 빠르게 만들 때는 다음 파일을 실행합니다.
-
-```powershell
-.\build-portable.bat
-```
-
-v2.0.1 릴리즈 빌드 파일 이름은 보통 다음 형식입니다.
+빌드 결과는 `dist` 폴더에 생성됩니다. v2.0.2 릴리즈 빌드 파일 이름은 다음 형식입니다.
 
 ```text
-dist\Jinjeop Line Signage 2.0.1.exe
+dist\Jinjeop Line Signage Setup 2.0.2.exe
+```
+
+자동 업데이트용 메타데이터로 `latest.yml`과 `.blockmap` 파일도 함께 생성됩니다.
+
+명령어 대신 더블클릭으로 빌드할 때는 다음 파일을 사용합니다.
+
+```powershell
+.\build-installer.bat
 ```
 
 ## 주요 메뉴
@@ -101,4 +106,3 @@ dist\Jinjeop Line Signage 2.0.1.exe
 - 열차 위치 정보는 외부 웹사이트 상태와 네트워크 환경의 영향을 받습니다.
 - 공지 파일 경로가 바뀌면 공지 패널에서 누락 파일 확인을 실행하세요.
 - Git에는 운영 PC의 개인 설정 파일, 로그, 캐시 파일을 포함하지 않습니다.
-
