@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   getAutoStartStatus: () => ipcRenderer.invoke('app:getAutoStartStatus'),
   openStartupFolder: () => ipcRenderer.invoke('app:openStartupFolder'),
   openWindowsStartupSettings: () => ipcRenderer.invoke('app:openWindowsStartupSettings'),
+  getMaintenanceStatus: () => ipcRenderer.invoke('maintenance:getStatus'),
+  getUpdateStatus: () => ipcRenderer.invoke('updater:getStatus'),
+  checkForUpdates: () => ipcRenderer.invoke('updater:checkNow'),
+  installUpdateNow: () => ipcRenderer.invoke('updater:installNow'),
   getTimetableCache: () => ipcRenderer.invoke('timetable:getCache'),
   refreshTimetable: (station) => ipcRenderer.invoke('timetable:refresh', station),
   getSolarTermsYear: (year) => ipcRenderer.invoke('solarTerms:getYear', year),
@@ -36,5 +40,6 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   onTogglePause: (callback) => ipcRenderer.on('shortcut:togglePause', () => callback()),
   onOpenPopupInCurrent: (callback) => ipcRenderer.on('browser:openPopupInCurrent', (_, url) => callback(url)),
   onBrowserZoomChanged: (callback) => ipcRenderer.on('browser:zoomChanged', (_, zoomPercent) => callback(zoomPercent)),
+  onUpdateStatusChanged: (callback) => ipcRenderer.on('updater:statusChanged', (_, status) => callback(status)),
   onFullscreenChanged: (callback) => ipcRenderer.on('window:fullscreenChanged', (_, isFullscreen) => callback(isFullscreen))
 });

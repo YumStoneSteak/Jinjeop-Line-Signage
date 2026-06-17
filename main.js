@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, screen, session, shell } = require('electron');
 const { execFileSync } = require('child_process');
+const { autoUpdater } = require('electron-updater');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -11,6 +12,13 @@ const {
   createDefaultConfig,
   normalizeBrowserZoomPercent
 } = require('./config-defaults');
+const {
+  normalizeMaintenanceSettings,
+  isWithinUnavailableWindow,
+  isTimeWithinUnavailableWindow,
+  getDelayUntilNextDailyTime,
+  getUnavailableWindowLabel
+} = require('./maintenance-utils');
 
 let mainWindow;
 let popupWindows = [];
@@ -27,6 +35,11 @@ let smssWebRequestWatchdogInstalled = false;
 let smssWatchdogTimer = null;
 let smssLogFilePath = null;
 let smssLogFileUnavailable = false;
+let updaterInitialized = false;
+let maintenanceUpdateTimer = null;
+let installAfterDownload = false;
+let updateCheckInFlight = false;
+let updateState = null;
 
 const SMSS_HOST = 'smss.seoulmetro.co.kr';
 const SMSS_WEBREQUEST_FILTER = { urls: [`*://${SMSS_HOST}/*`] };
@@ -38,10 +51,27 @@ const AUTO_START_VALUE_NAME = 'JinjeopLineSignage';
 const LEGACY_AUTO_START_VALUE_NAMES = ['NamyangjuDashboard'];
 const smssDiagnosticContents = new Set();
 const smssConsoleForwardContents = new Set();
+const smokeTestMode = process.argv.includes('--smoke-test');
 
 app.setName(DISPLAY_APP_NAME);
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_ID);
+}
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  });
 }
 
 const ADVICE_API_URL = 'https://korean-advice-open-api.vercel.app/api/advice';
@@ -106,6 +136,10 @@ function normalizeUiSettings(input) {
   };
 }
 
+function normalizeMaintenanceConfig(input) {
+  return normalizeMaintenanceSettings(input || defaultConfig.maintenance);
+}
+
 function hasMissingStartupWindowConfig(config) {
   const windowConfig = config?.window || {};
   return !hasOwn(windowConfig, 'autoStart') || !hasOwn(windowConfig, 'startFullscreen');
@@ -114,6 +148,12 @@ function hasMissingStartupWindowConfig(config) {
 function hasMissingUiConfig(config) {
   const uiConfig = config?.ui || {};
   return !hasOwn(uiConfig, 'adminOptionsEnabled');
+}
+
+function hasMissingMaintenanceConfig(config) {
+  const maintenanceConfig = config?.maintenance || {};
+  return ['autoUpdateEnabled', 'updateTime', 'unavailableStartTime', 'unavailableEndTime']
+    .some((key) => !hasOwn(maintenanceConfig, key));
 }
 
 const timetableStations = {
@@ -1142,6 +1182,7 @@ function mergeConfig(userConfig) {
     },
     window: normalizeWindowSettings(userConfig.window),
     ui: normalizeUiSettings(userConfig.ui),
+    maintenance: normalizeMaintenanceConfig(userConfig.maintenance),
     sidebar: {
       ...defaultConfig.sidebar,
       ...(userConfig.sidebar || {}),
@@ -1499,7 +1540,12 @@ function loadConfig() {
     const parsed = JSON.parse(raw);
     persistedConfig = mergeConfig(parsed);
     draftConfig = deepClone(persistedConfig);
-    if (hasUnknownPlayerConfig(parsed) || hasMissingStartupWindowConfig(parsed) || hasMissingUiConfig(parsed)) {
+    if (
+      hasUnknownPlayerConfig(parsed)
+      || hasMissingStartupWindowConfig(parsed)
+      || hasMissingUiConfig(parsed)
+      || hasMissingMaintenanceConfig(parsed)
+    ) {
       fs.writeFileSync(configPath, JSON.stringify(persistedConfig, null, 2), 'utf-8');
     }
   } catch (err) {
@@ -1516,6 +1562,7 @@ function writeConfig(config) {
   persistedConfig = deepClone(merged);
   draftConfig = deepClone(merged);
   unsavedChanges = false;
+  scheduleMaintenanceUpdateCheck();
   return merged;
 }
 
@@ -1526,6 +1573,290 @@ function applyWindowOptions() {
 
   const { alwaysOnTop } = persistedConfig.window;
   mainWindow.setAlwaysOnTop(!!alwaysOnTop, 'screen-saver');
+}
+
+function getMaintenanceConfig() {
+  return normalizeMaintenanceConfig(persistedConfig?.maintenance);
+}
+
+function getInitialUpdateState() {
+  const maintenance = getMaintenanceConfig();
+  return {
+    supported: false,
+    enabled: !!maintenance.autoUpdateEnabled,
+    state: 'idle',
+    message: '자동 업데이트 초기화 대기 중',
+    currentVersion: app.getVersion(),
+    nextCheckAt: null,
+    lastCheckedAt: null,
+    availableVersion: null,
+    downloadedVersion: null,
+    downloadedAt: null,
+    progressPercent: null,
+    error: null,
+    isUnavailableNow: isWithinUnavailableWindow(new Date(), maintenance),
+    unavailableWindow: getUnavailableWindowLabel(maintenance),
+    updateTime: maintenance.updateTime
+  };
+}
+
+function getUpdateStatus() {
+  if (!updateState) {
+    updateState = getInitialUpdateState();
+  }
+  const maintenance = getMaintenanceConfig();
+  return {
+    ...updateState,
+    enabled: !!maintenance.autoUpdateEnabled,
+    currentVersion: app.getVersion(),
+    isUnavailableNow: isWithinUnavailableWindow(new Date(), maintenance),
+    unavailableWindow: getUnavailableWindowLabel(maintenance),
+    updateTime: maintenance.updateTime
+  };
+}
+
+function sendUpdateStatus() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send('updater:statusChanged', getUpdateStatus());
+}
+
+function setUpdateStatus(patch = {}) {
+  updateState = {
+    ...getUpdateStatus(),
+    ...patch
+  };
+  sendUpdateStatus();
+  return getUpdateStatus();
+}
+
+function isUpdaterSupported() {
+  return process.platform === 'win32' && app.isPackaged && !!autoUpdater;
+}
+
+function clearMaintenanceUpdateTimer() {
+  if (maintenanceUpdateTimer) {
+    clearTimeout(maintenanceUpdateTimer);
+    maintenanceUpdateTimer = null;
+  }
+}
+
+function initializeAutoUpdater() {
+  if (updaterInitialized) {
+    return getUpdateStatus();
+  }
+  updaterInitialized = true;
+
+  if (!isUpdaterSupported()) {
+    return setUpdateStatus({
+      supported: false,
+      state: 'unsupported',
+      message: app.isPackaged
+        ? '현재 환경에서는 자동 업데이트를 사용할 수 없습니다.'
+        : '자동 업데이트는 NSIS 설치형 앱에서만 동작합니다.',
+      error: null
+    });
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on('checking-for-update', () => {
+    updateCheckInFlight = true;
+    setUpdateStatus({
+      supported: true,
+      state: 'checking',
+      message: '업데이트 확인 중',
+      lastCheckedAt: new Date().toISOString(),
+      progressPercent: null,
+      error: null
+    });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    setUpdateStatus({
+      supported: true,
+      state: 'available',
+      message: `새 버전 ${info?.version || ''} 다운로드 중`,
+      availableVersion: info?.version || null,
+      error: null
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    setUpdateStatus({
+      supported: true,
+      state: 'downloading',
+      message: `업데이트 다운로드 중 ${Math.round(Number(progress?.percent) || 0)}%`,
+      progressPercent: Math.round(Number(progress?.percent) || 0),
+      error: null
+    });
+  });
+
+  autoUpdater.on('update-not-available', (info) => {
+    updateCheckInFlight = false;
+    installAfterDownload = false;
+    setUpdateStatus({
+      supported: true,
+      state: 'not-available',
+      message: '현재 최신 버전입니다.',
+      availableVersion: info?.version || null,
+      progressPercent: null,
+      error: null
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    updateCheckInFlight = false;
+    setUpdateStatus({
+      supported: true,
+      state: 'downloaded',
+      message: `업데이트 ${info?.version || ''} 설치 준비 완료`,
+      availableVersion: info?.version || null,
+      downloadedVersion: info?.version || null,
+      downloadedAt: new Date().toISOString(),
+      progressPercent: 100,
+      error: null
+    });
+
+    if (installAfterDownload) {
+      installAfterDownload = false;
+      installDownloadedUpdate({ silent: true, forceRunAfter: true });
+    }
+  });
+
+  autoUpdater.on('error', (err) => {
+    updateCheckInFlight = false;
+    installAfterDownload = false;
+    setUpdateStatus({
+      supported: true,
+      state: 'error',
+      message: '업데이트 처리 중 오류가 발생했습니다.',
+      progressPercent: null,
+      error: err?.message || String(err)
+    });
+  });
+
+  return setUpdateStatus({
+    supported: true,
+    state: 'idle',
+    message: '자동 업데이트 준비 완료',
+    error: null
+  });
+}
+
+async function checkForUpdates({ source = 'manual', installWhenDownloaded = false } = {}) {
+  initializeAutoUpdater();
+  const maintenance = getMaintenanceConfig();
+  const scheduled = source === 'scheduled';
+
+  if (scheduled && !maintenance.autoUpdateEnabled) {
+    return setUpdateStatus({
+      state: 'disabled',
+      message: '자동 업데이트가 꺼져 있습니다.',
+      error: null
+    });
+  }
+
+  if (scheduled && isWithinUnavailableWindow(new Date(), maintenance)) {
+    return setUpdateStatus({
+      state: 'skipped',
+      message: `운영 불가능 시간대(${getUnavailableWindowLabel(maintenance)})라 자동 업데이트를 건너뜁니다.`,
+      error: null
+    });
+  }
+
+  if (!isUpdaterSupported()) {
+    return getUpdateStatus();
+  }
+
+  if (updateCheckInFlight) {
+    return getUpdateStatus();
+  }
+
+  installAfterDownload = !!installWhenDownloaded;
+  try {
+    await autoUpdater.checkForUpdates();
+    return getUpdateStatus();
+  } catch (err) {
+    updateCheckInFlight = false;
+    installAfterDownload = false;
+    return setUpdateStatus({
+      state: 'error',
+      message: '업데이트 확인에 실패했습니다.',
+      error: err?.message || String(err)
+    });
+  }
+}
+
+function installDownloadedUpdate({ silent = true, forceRunAfter = true } = {}) {
+  initializeAutoUpdater();
+  if (!isUpdaterSupported()) {
+    return getUpdateStatus();
+  }
+
+  if (getUpdateStatus().state !== 'downloaded') {
+    return checkForUpdates({ source: 'manual-install', installWhenDownloaded: true });
+  }
+
+  setUpdateStatus({
+    state: 'installing',
+    message: '업데이트 설치를 시작합니다.',
+    error: null
+  });
+  bypassClosePrompt = true;
+  unsavedChanges = false;
+  setTimeout(() => {
+    autoUpdater.quitAndInstall(silent, forceRunAfter);
+  }, 300);
+  return getUpdateStatus();
+}
+
+function runScheduledUpdateCheck() {
+  checkForUpdates({ source: 'scheduled', installWhenDownloaded: true })
+    .finally(() => {
+      scheduleMaintenanceUpdateCheck();
+    });
+}
+
+function scheduleMaintenanceUpdateCheck() {
+  clearMaintenanceUpdateTimer();
+  const maintenance = getMaintenanceConfig();
+  initializeAutoUpdater();
+
+  if (!maintenance.autoUpdateEnabled) {
+    setUpdateStatus({
+      state: 'disabled',
+      message: '자동 업데이트가 꺼져 있습니다.',
+      nextCheckAt: null,
+      error: null
+    });
+    return;
+  }
+
+  if (isTimeWithinUnavailableWindow(maintenance.updateTime, maintenance)) {
+    setUpdateStatus({
+      state: 'invalid-schedule',
+      message: `업데이트 시간이 운영 불가능 시간대(${getUnavailableWindowLabel(maintenance)}) 안에 있습니다.`,
+      nextCheckAt: null,
+      error: 'Update time is inside the unavailable window.'
+    });
+    return;
+  }
+
+  const delay = getDelayUntilNextDailyTime(maintenance.updateTime);
+  const nextCheckAt = new Date(Date.now() + delay).toISOString();
+  setUpdateStatus({
+    nextCheckAt,
+    state: getUpdateStatus().state === 'unsupported' ? 'unsupported' : getUpdateStatus().state,
+    message: getUpdateStatus().state === 'unsupported'
+      ? getUpdateStatus().message
+      : `다음 자동 업데이트 확인: ${maintenance.updateTime}`,
+    error: getUpdateStatus().state === 'unsupported' ? getUpdateStatus().error : null
+  });
+  maintenanceUpdateTimer = setTimeout(runScheduledUpdateCheck, delay);
+  maintenanceUpdateTimer.unref?.();
 }
 
 function getAutoStartLaunchOptions() {
@@ -1902,6 +2233,12 @@ function createMainWindow() {
     applyPresentationWindowMode();
     mainWindow.show();
     flushAutoStartWarning();
+    if (smokeTestMode) {
+      setTimeout(() => {
+        bypassClosePrompt = true;
+        app.quit();
+      }, 1200);
+    }
   });
 
   mainWindow.on('minimize', (event) => {
@@ -2017,6 +2354,8 @@ app.whenReady().then(() => {
   loadConfig();
   presentationMode = !!persistedConfig?.window?.startFullscreen;
   syncAutoStartSetting({ notifyOnFailure: true });
+  initializeAutoUpdater();
+  scheduleMaintenanceUpdateCheck();
   installSmssWebRequestWatchdog();
   createMainWindow();
 
@@ -2040,6 +2379,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  clearMaintenanceUpdateTimer();
   if (smssWatchdogTimer) {
     clearInterval(smssWatchdogTimer);
     smssWatchdogTimer = null;
@@ -2058,10 +2398,23 @@ ipcMain.handle('app:openStartupFolder', () => openStartupFolder());
 
 ipcMain.handle('app:openWindowsStartupSettings', () => openWindowsStartupSettings());
 
+ipcMain.handle('maintenance:getStatus', () => ({
+  settings: getMaintenanceConfig(),
+  isUnavailableNow: isWithinUnavailableWindow(new Date(), getMaintenanceConfig()),
+  unavailableWindow: getUnavailableWindowLabel(getMaintenanceConfig())
+}));
+
+ipcMain.handle('updater:getStatus', () => getUpdateStatus());
+
+ipcMain.handle('updater:checkNow', () => checkForUpdates({ source: 'manual', installWhenDownloaded: false }));
+
+ipcMain.handle('updater:installNow', () => installDownloadedUpdate({ silent: true, forceRunAfter: true }));
+
 ipcMain.handle('config:save', (_, config) => {
   const saved = writeConfig(config);
   syncAutoStartSetting({ notifyOnFailure: true });
   applyWindowOptions();
+  scheduleMaintenanceUpdateCheck();
   return deepClone(saved);
 });
 

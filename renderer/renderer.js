@@ -6,6 +6,13 @@ const {
   createDefaultConfig,
   normalizeBrowserZoomPercent
 } = window.dashboardConfigDefaults;
+const {
+  normalizeMaintenanceSettings,
+  isWithinUnavailableWindow,
+  isTimeWithinUnavailableWindow,
+  getDelayUntilUnavailableWindowEnds,
+  getUnavailableWindowLabel
+} = window.dashboardMaintenanceUtils;
 const { getKoreanAirQuality } = window.dashboardAirQuality;
 const fallbackDailyAdvice = {
   message: '오늘도 좋은 하루 보내세요.',
@@ -95,7 +102,10 @@ const state = {
   dragRecordRequestId: 0,
   trainInfoAutoRefreshTimer: null,
   trainInfoAutoRefreshLastRunAt: null,
-  smssLayoutFullscreenState: null
+  smssLayoutFullscreenState: null,
+  maintenanceResumeTimer: null,
+  maintenanceStatusTimer: null,
+  updateStatus: null
 };
 
 const els = {
@@ -188,6 +198,14 @@ const els = {
   btnResetAllDefaults: document.getElementById('btnResetAllDefaults'),
   btnOpenStartupFolder: document.getElementById('btnOpenStartupFolder'),
   btnOpenStartupSettings: document.getElementById('btnOpenStartupSettings'),
+  checkAutoUpdateEnabled: document.getElementById('checkAutoUpdateEnabled'),
+  inputUpdateTime: document.getElementById('inputUpdateTime'),
+  inputUnavailableStartTime: document.getElementById('inputUnavailableStartTime'),
+  inputUnavailableEndTime: document.getElementById('inputUnavailableEndTime'),
+  maintenanceStatus: document.getElementById('maintenanceStatus'),
+  updateStatusText: document.getElementById('updateStatusText'),
+  btnCheckForUpdates: document.getElementById('btnCheckForUpdates'),
+  btnInstallUpdate: document.getElementById('btnInstallUpdate'),
 
   trainInfoPanel: document.getElementById('trainInfoPanel'),
   btnSaveTrainInfoSettings: document.getElementById('btnSaveTrainInfoSettings'),
@@ -267,6 +285,7 @@ function normalizeForSave(config) {
   };
   clone.window = normalizeWindowSettings(clone.window);
   clone.ui = normalizeUiSettings(clone.ui);
+  clone.maintenance = normalizeMaintenanceSettings(clone.maintenance);
   clone.sidebar = {
     width: clampSidebarWidth(clone.sidebar?.width),
     logoPath: normalizeLogoPath(clone.sidebar?.logoPath),
@@ -1043,6 +1062,39 @@ function normalizeWindowSettings(rawSettings) {
   };
 }
 
+function getDraftMaintenanceSettings() {
+  return normalizeMaintenanceSettings(state.draftConfig?.maintenance || defaultConfig.maintenance);
+}
+
+function isAutomaticWorkSuspended(now = new Date()) {
+  return isWithinUnavailableWindow(now, getDraftMaintenanceSettings());
+}
+
+function scheduleMaintenanceResume() {
+  if (state.maintenanceResumeTimer) {
+    return;
+  }
+
+  const delayMs = getDelayUntilUnavailableWindowEnds(new Date(), getDraftMaintenanceSettings());
+  if (!delayMs) {
+    return;
+  }
+
+  state.maintenanceResumeTimer = setTimeout(() => {
+    state.maintenanceResumeTimer = null;
+    renderMaintenanceStatus();
+    scheduleTrainInfoAutoRefresh();
+    updateBackgroundWidgetTasks({ forceWeather: true });
+  }, delayMs + 1000);
+}
+
+function clearMaintenanceResumeTimer() {
+  if (state.maintenanceResumeTimer) {
+    clearTimeout(state.maintenanceResumeTimer);
+    state.maintenanceResumeTimer = null;
+  }
+}
+
 function applyBrowserSettings() {
   const normalized = normalizeUrl(state.draftConfig.browser.url);
   state.draftConfig.browser.url = normalized;
@@ -1129,6 +1181,97 @@ function setDraftTrainInfoAutoRefreshSettings(nextSettings = {}) {
   };
 }
 
+function renderMaintenanceStatus() {
+  const settings = getDraftMaintenanceSettings();
+  if (els.checkAutoUpdateEnabled) {
+    els.checkAutoUpdateEnabled.checked = !!settings.autoUpdateEnabled;
+  }
+  if (els.inputUpdateTime) {
+    els.inputUpdateTime.value = settings.updateTime;
+  }
+  if (els.inputUnavailableStartTime) {
+    els.inputUnavailableStartTime.value = settings.unavailableStartTime;
+  }
+  if (els.inputUnavailableEndTime) {
+    els.inputUnavailableEndTime.value = settings.unavailableEndTime;
+  }
+  if (!els.maintenanceStatus) {
+    return;
+  }
+
+  const unavailableLabel = getUnavailableWindowLabel(settings);
+  if (isTimeWithinUnavailableWindow(settings.updateTime, settings)) {
+    els.maintenanceStatus.textContent = `업데이트 시간이 꺼져있을 시간(${unavailableLabel}) 안에 있습니다. 자동 업데이트 시간을 앞당겨 주세요.`;
+    return;
+  }
+  if (isAutomaticWorkSuspended()) {
+    els.maintenanceStatus.textContent = `꺼져있을 시간(${unavailableLabel})입니다. 자동 업데이트와 자동 갱신을 보류합니다.`;
+    return;
+  }
+  els.maintenanceStatus.textContent = `업데이트 ${settings.updateTime} / 꺼짐 ${settings.unavailableStartTime} / 켜짐 ${settings.unavailableEndTime}`;
+}
+
+function formatUpdateStatus(status = state.updateStatus) {
+  if (!status) {
+    return '업데이트 상태 확인 중';
+  }
+  const parts = [status.message || '업데이트 대기 중'];
+  if (status.nextCheckAt) {
+    const next = new Date(status.nextCheckAt);
+    if (!Number.isNaN(next.getTime())) {
+      parts.push(`다음 확인 ${next.toLocaleString('ko-KR', { hour: '2-digit', minute: '2-digit', month: '2-digit', day: '2-digit' })}`);
+    }
+  }
+  if (status.error) {
+    parts.push(`오류: ${status.error}`);
+  }
+  return parts.join(' / ');
+}
+
+function renderUpdateStatus(status = state.updateStatus) {
+  state.updateStatus = status || state.updateStatus;
+  if (els.updateStatusText) {
+    els.updateStatusText.textContent = formatUpdateStatus(state.updateStatus);
+  }
+  if (els.btnInstallUpdate) {
+    const canInstall = state.updateStatus?.state === 'downloaded'
+      || state.updateStatus?.state === 'available'
+      || state.updateStatus?.state === 'not-available'
+      || state.updateStatus?.state === 'idle';
+    els.btnInstallUpdate.disabled = state.updateStatus?.state === 'checking'
+      || state.updateStatus?.state === 'downloading'
+      || state.updateStatus?.state === 'installing'
+      || state.updateStatus?.supported === false
+      || !canInstall;
+  }
+  if (els.btnCheckForUpdates) {
+    els.btnCheckForUpdates.disabled = state.updateStatus?.state === 'checking'
+      || state.updateStatus?.state === 'downloading'
+      || state.updateStatus?.state === 'installing';
+  }
+}
+
+async function refreshUpdateStatus() {
+  if (typeof window.desktopAPI.getUpdateStatus !== 'function') {
+    renderUpdateStatus({
+      supported: false,
+      state: 'unsupported',
+      message: '업데이트 상태 API를 사용할 수 없습니다.'
+    });
+    return;
+  }
+  try {
+    renderUpdateStatus(await window.desktopAPI.getUpdateStatus());
+  } catch (err) {
+    renderUpdateStatus({
+      supported: false,
+      state: 'error',
+      message: '업데이트 상태 확인 실패',
+      error: err.message || String(err)
+    });
+  }
+}
+
 function formatTrainInfoAutoRefreshHours(hours) {
   const normalized = normalizeTrainInfoAutoRefreshIntervalHours(hours);
   return Number.isInteger(normalized) ? `${normalized}시간` : `${normalized.toFixed(1)}시간`;
@@ -1147,9 +1290,11 @@ function renderTrainInfoAutoRefreshStatus() {
     return;
   }
 
-  const baseText = settings.enabled
-    ? `자동 새로고침: ${formatTrainInfoAutoRefreshHours(settings.intervalHours)}마다 실행`
-    : '자동 새로고침: 꺼짐';
+  const baseText = settings.enabled && isAutomaticWorkSuspended()
+    ? `자동 새로고침: 꺼져있을 시간(${getUnavailableWindowLabel(getDraftMaintenanceSettings())})이라 보류`
+    : settings.enabled
+      ? `자동 새로고침: ${formatTrainInfoAutoRefreshHours(settings.intervalHours)}마다 실행`
+      : '자동 새로고침: 꺼짐';
   const lastRunText = state.trainInfoAutoRefreshLastRunAt
     ? ` / 마지막 실행 ${new Date(state.trainInfoAutoRefreshLastRunAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`
     : '';
@@ -1171,6 +1316,11 @@ function scheduleTrainInfoAutoRefresh() {
   if (!settings.enabled) {
     return;
   }
+  if (isAutomaticWorkSuspended()) {
+    scheduleMaintenanceResume();
+    renderTrainInfoAutoRefreshStatus();
+    return;
+  }
 
   const intervalMs = Math.max(1, settings.intervalHours) * 60 * 60 * 1000;
   state.trainInfoAutoRefreshTimer = setTimeout(async () => {
@@ -1183,6 +1333,11 @@ function scheduleTrainInfoAutoRefresh() {
 async function runTrainInfoAutoRefresh() {
   const settings = getDraftTrainInfoAutoRefreshSettings();
   if (!settings.enabled) {
+    return false;
+  }
+  if (isAutomaticWorkSuspended()) {
+    scheduleMaintenanceResume();
+    renderTrainInfoAutoRefreshStatus();
     return false;
   }
   state.trainInfoAutoRefreshLastRunAt = new Date().toISOString();
@@ -2304,7 +2459,7 @@ function applySettingsToForm() {
     els.checkAdminOptions.checked = !!state.draftConfig.ui?.adminOptionsEnabled;
   }
   if (els.appVersionText) {
-    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.0.2'}`;
+    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.1.0'}`;
   }
   if (els.checkAutoStart) {
     els.checkAutoStart.checked = !!state.draftConfig.window.autoStart;
@@ -2312,6 +2467,7 @@ function applySettingsToForm() {
   if (els.checkStartFullscreen) {
     els.checkStartFullscreen.checked = !!state.draftConfig.window.startFullscreen;
   }
+  renderMaintenanceStatus();
   if (els.inputSidebarWidth) {
     els.inputSidebarWidth.value = clampSidebarWidth(state.draftConfig.sidebar?.width);
   }
@@ -2682,6 +2838,7 @@ async function saveSettingsToDisk() {
   applyBrowserSettings();
   applySettingsToForm();
   await refreshStartupStatus();
+  await refreshUpdateStatus();
   scheduleTrainInfoAutoRefresh();
   renderPlaylist();
   showSlide(state.currentIndex);
@@ -2719,6 +2876,7 @@ function resetGeneralSettingsToDefaults() {
   state.draftConfig.layout = deepClone(defaults.layout);
   state.draftConfig.window = normalizeWindowSettings(defaults.window);
   state.draftConfig.ui = normalizeUiSettings(defaults.ui);
+  state.draftConfig.maintenance = normalizeMaintenanceSettings(defaults.maintenance);
 }
 
 function resetTrainInfoSettingsToDefaults() {
@@ -2763,6 +2921,7 @@ function mergeUIState(oldConfig, newConfig) {
     },
     window: normalizeWindowSettings(newConfig.window),
     ui: normalizeUiSettings(newConfig.ui),
+    maintenance: normalizeMaintenanceSettings(newConfig.maintenance),
     sidebar: {
       ...defaultConfig.sidebar,
       ...(newConfig.sidebar || {}),
@@ -2809,6 +2968,15 @@ function bindSettingsForm() {
       autoStart: els.checkAutoStart ? els.checkAutoStart.checked : state.draftConfig.window?.autoStart,
       startFullscreen: els.checkStartFullscreen ? els.checkStartFullscreen.checked : state.draftConfig.window?.startFullscreen
     });
+    state.draftConfig.maintenance = normalizeMaintenanceSettings({
+      ...(state.draftConfig.maintenance || {}),
+      autoUpdateEnabled: els.checkAutoUpdateEnabled
+        ? els.checkAutoUpdateEnabled.checked
+        : state.draftConfig.maintenance?.autoUpdateEnabled,
+      updateTime: els.inputUpdateTime?.value,
+      unavailableStartTime: els.inputUnavailableStartTime?.value,
+      unavailableEndTime: els.inputUnavailableEndTime?.value
+    });
     state.draftConfig.sidebar = {
       ...(state.draftConfig.sidebar || {}),
       width: clampSidebarWidth(els.inputSidebarWidth?.value),
@@ -2822,6 +2990,7 @@ function bindSettingsForm() {
     scheduleTrainInfoAutoRefresh();
     renderDragReplayStatus();
     updatePopupModeVisibility();
+    renderMaintenanceStatus();
     renderStartupStatus();
     updateAdminOptionVisibility();
     if (nextUrl !== previousUrl) {
@@ -2851,6 +3020,10 @@ function bindSettingsForm() {
     els.checkPreventMin,
     els.checkAutoStart,
     els.checkStartFullscreen,
+    els.checkAutoUpdateEnabled,
+    els.inputUpdateTime,
+    els.inputUnavailableStartTime,
+    els.inputUnavailableEndTime,
     els.inputSidebarWidth,
     els.inputLogoPath
   ].forEach((input) => {
@@ -3045,6 +3218,42 @@ function bindToolbarAndPanels() {
         : `Windows 시작 프로그램: 설정 창 열기 실패 (${result?.error || '알 수 없는 오류'})`;
     } catch (err) {
       els.startupStatus.textContent = `Windows 시작 프로그램: 설정 창 열기 실패 (${err.message || err})`;
+    }
+  });
+
+  els.btnCheckForUpdates?.addEventListener('click', async () => {
+    renderUpdateStatus({
+      ...(state.updateStatus || {}),
+      state: 'checking',
+      message: '업데이트 확인 중'
+    });
+    try {
+      renderUpdateStatus(await window.desktopAPI.checkForUpdates?.());
+    } catch (err) {
+      renderUpdateStatus({
+        supported: false,
+        state: 'error',
+        message: '업데이트 확인 실패',
+        error: err.message || String(err)
+      });
+    }
+  });
+
+  els.btnInstallUpdate?.addEventListener('click', async () => {
+    renderUpdateStatus({
+      ...(state.updateStatus || {}),
+      state: 'installing',
+      message: '업데이트 설치 준비 중'
+    });
+    try {
+      renderUpdateStatus(await window.desktopAPI.installUpdateNow?.());
+    } catch (err) {
+      renderUpdateStatus({
+        supported: false,
+        state: 'error',
+        message: '업데이트 설치 실패',
+        error: err.message || String(err)
+      });
     }
   });
 
@@ -3773,6 +3982,12 @@ function syncTimetableUpdates() {
     state.timetableTimer = null;
   }
 
+  if (isAutomaticWorkSuspended()) {
+    scheduleMaintenanceResume();
+    renderTimetableSettingsStatus();
+    return;
+  }
+
   if (!isSidebarWidgetVisible('trainSchedule')) {
     clearNextTrainWidget();
     renderTimetableSettingsStatus();
@@ -3825,6 +4040,10 @@ function updateStatusToast() {
   }
 
   const parts = [];
+  if (isAutomaticWorkSuspended()) {
+    parts.push(`자동 작업 보류 (${getUnavailableWindowLabel(getDraftMaintenanceSettings())})`);
+  }
+
   if (isSidebarWidgetShown('weather')) {
     parts.push(state.weatherLastUpdatedAt
       ? `날씨 갱신 (${formatHourMinute(state.weatherLastUpdatedAt)})`
@@ -4075,6 +4294,16 @@ function renderMultiInfoWidget(options = {}) {
 }
 
 function syncMultiInfoWidget() {
+  if (isAutomaticWorkSuspended()) {
+    if (state.multiInfoTimer) {
+      clearInterval(state.multiInfoTimer);
+      state.multiInfoTimer = null;
+    }
+    state.multiInfoTimerKey = '';
+    scheduleMaintenanceResume();
+    return;
+  }
+
   const panes = getMultiInfoPanes();
   if (panes.length === 0) {
     if (state.multiInfoTimer) {
@@ -4246,6 +4475,15 @@ async function loadSolarTermWidget() {
 }
 
 function syncSolarTermUpdates() {
+  if (isAutomaticWorkSuspended()) {
+    if (state.solarTermTimer) {
+      clearInterval(state.solarTermTimer);
+      state.solarTermTimer = null;
+    }
+    scheduleMaintenanceResume();
+    return;
+  }
+
   if (!shouldUseSolarTermData()) {
     if (state.solarTermTimer) {
       clearInterval(state.solarTermTimer);
@@ -4412,6 +4650,11 @@ function scheduleNextDailyAdviceRefresh() {
     state.adviceTimer = null;
   }
 
+  if (isAutomaticWorkSuspended()) {
+    scheduleMaintenanceResume();
+    return;
+  }
+
   if (!shouldUseDailyAdviceData()) {
     return;
   }
@@ -4424,6 +4667,15 @@ function scheduleNextDailyAdviceRefresh() {
 }
 
 function syncDailyAdviceUpdates() {
+  if (isAutomaticWorkSuspended()) {
+    if (state.adviceTimer) {
+      clearTimeout(state.adviceTimer);
+      state.adviceTimer = null;
+    }
+    scheduleMaintenanceResume();
+    return;
+  }
+
   if (!shouldUseDailyAdviceData()) {
     if (state.adviceTimer) {
       clearTimeout(state.adviceTimer);
@@ -4478,6 +4730,11 @@ function applyTemperatureDisplayOrder(month = new Date().getMonth() + 1) {
 }
 
 async function updateWeather() {
+  if (isAutomaticWorkSuspended()) {
+    scheduleMaintenanceResume();
+    return;
+  }
+
   if (!isSidebarWidgetVisible('weather')) {
     return;
   }
@@ -4534,6 +4791,15 @@ async function updateWeather() {
 }
 
 function syncWeatherUpdates(forceRefresh = false) {
+  if (isAutomaticWorkSuspended()) {
+    if (state.weatherTimer) {
+      clearInterval(state.weatherTimer);
+      state.weatherTimer = null;
+    }
+    scheduleMaintenanceResume();
+    return;
+  }
+
   if (!isSidebarWidgetVisible('weather')) {
     if (state.weatherTimer) {
       clearInterval(state.weatherTimer);
@@ -4556,6 +4822,10 @@ function syncWeatherUpdates(forceRefresh = false) {
 }
 
 function updateBackgroundWidgetTasks({ forceWeather = false } = {}) {
+  renderMaintenanceStatus();
+  if (!isAutomaticWorkSuspended()) {
+    clearMaintenanceResumeTimer();
+  }
   syncClockUpdates();
   syncWeatherUpdates(forceWeather);
   syncTimetableUpdates();
@@ -4642,6 +4912,11 @@ async function init() {
   if (els.toolbarTitle && state.appVersion) {
     els.toolbarTitle.textContent = `${KOREAN_APP_NAME} (v${state.appVersion})`;
   }
+  if (typeof window.desktopAPI.onUpdateStatusChanged === 'function') {
+    window.desktopAPI.onUpdateStatusChanged((status) => {
+      renderUpdateStatus(status);
+    });
+  }
 
   setupSidebarSettingsPanel();
   bindToolbarAndPanels();
@@ -4662,6 +4937,8 @@ async function init() {
   applyBrowserSettings();
   logSmssLayoutState('init');
   applySettingsToForm();
+  await refreshUpdateStatus();
+  state.maintenanceStatusTimer = setInterval(renderMaintenanceStatus, 60 * 1000);
   scheduleTrainInfoAutoRefresh();
   renderPlaylist();
   updateBackgroundWidgetTasks();

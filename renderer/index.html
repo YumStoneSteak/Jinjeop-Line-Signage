@@ -109,7 +109,7 @@
     <div id="weatherUpdateStatus" class="weather-update-status">날씨 업데이트 대기 중</div>
 
     <header id="toolbar">
-      <div id="toolbarTitle" class="toolbar-title">진접선 행선안내 사이니지 (v2.0.2)</div>
+      <div id="toolbarTitle" class="toolbar-title">진접선 행선안내 사이니지 (v2.1.0)</div>
       <div class="toolbar-actions">
         <button id="btnScreenSettings" type="button" title="일반 설정" aria-label="일반 설정">일반 설정</button>
         <button id="btnSidebarSettings" type="button" title="위젯" aria-label="위젯">위젯</button>
@@ -331,6 +331,31 @@
       </section>
 
       <section class="settings-section">
+        <h3>운영 시간 / 자동 업데이트</h3>
+        <div class="form-grid">
+          <label class="checkbox-row wide-field">
+            <input id="checkAutoUpdateEnabled" type="checkbox" />
+            <span>GitHub 릴리즈 자동 업데이트</span>
+          </label>
+          <label>업데이트 시간
+            <input id="inputUpdateTime" type="time" />
+          </label>
+          <label>꺼지는 시간
+            <input id="inputUnavailableStartTime" type="time" />
+          </label>
+          <label>켜지는 시간
+            <input id="inputUnavailableEndTime" type="time" />
+          </label>
+          <p id="maintenanceStatus" class="settings-note wide-field">운영 시간 확인 중</p>
+          <p id="updateStatusText" class="settings-note wide-field">업데이트 상태 확인 중</p>
+          <div class="panel-buttons startup-action-buttons wide-field">
+            <button id="btnCheckForUpdates" type="button">업데이트 확인</button>
+            <button id="btnInstallUpdate" type="button">지금 설치</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
         <h3>관리</h3>
         <div class="form-grid">
           <label class="checkbox-row wide-field admin-option-row" data-tooltip="제작: 철도지원부 이동혁 대리. 2026. 4. 24." aria-label="관리자 옵션. 제작: 철도지원부 이동혁 대리. 2026. 4. 24.">
@@ -338,7 +363,7 @@
             <span>관리자 옵션</span>
           </label>
           <p class="settings-note wide-field">불필요 옵션이 표시됩니다.</p>
-          <p id="appVersionText" class="settings-note wide-field">현재 버전: v2.0.2</p>
+          <p id="appVersionText" class="settings-note wide-field">현재 버전: v2.1.0</p>
         </div>
       </section>
 
@@ -420,6 +445,7 @@
     </aside>
 
     <script src="../config-defaults.js"></script>
+    <script src="../maintenance-utils.js"></script>
     <script src="../air-quality.js"></script>
     <script src="renderer.js"></script>
   </body>

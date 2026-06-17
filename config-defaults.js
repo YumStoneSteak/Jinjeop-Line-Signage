@@ -79,6 +79,12 @@
       ui: {
         adminOptionsEnabled: false
       },
+      maintenance: {
+        autoUpdateEnabled: true,
+        updateTime: '01:00',
+        unavailableStartTime: '02:00',
+        unavailableEndTime: '04:30'
+      },
       sidebar: {
         width: 350,
         logoPath: sidebarOverrides.logoPath || DEFAULT_LOGO_RELATIVE_PATH,
