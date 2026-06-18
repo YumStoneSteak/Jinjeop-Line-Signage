@@ -12,7 +12,7 @@
   "build": {
     "appId": "kr.or.ncuc.jinjeop-line-signage",
     "productName": "Jinjeop Line Signage",
-    "artifactName": "Jinjeop Line Signage v${version}.${ext}",
+    "artifactName": "Jinjeop.Line.Signage.v${version}.${ext}",
     "toolsets": {
       "winCodeSign": "1.1.0"
     },
@@ -25,7 +25,7 @@
       ]
     },
     "nsis": {
-      "artifactName": "Jinjeop Line Signage v${version}.${ext}",
+      "artifactName": "Jinjeop.Line.Signage.v${version}.${ext}",
       "include": "build/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

@@ -63,8 +63,8 @@
 배포 파일명은 `package.json` 버전을 기준으로 자동 결정됩니다.
 
 ```text
-dist\Jinjeop Line Signage v버전.exe
-dist\Jinjeop Line Signage v버전.exe.blockmap
+dist\Jinjeop.Line.Signage.v버전.exe
+dist\Jinjeop.Line.Signage.v버전.exe.blockmap
 dist\latest.yml
 ```
 
@@ -97,8 +97,8 @@ GitHub Desktop만 사용해도 소스 코드는 올릴 수 있습니다.
 9. 다음 세 파일을 업로드합니다.
 
 ```text
-dist\Jinjeop Line Signage v버전.exe
-dist\Jinjeop Line Signage v버전.exe.blockmap
+dist\Jinjeop.Line.Signage.v버전.exe
+dist\Jinjeop.Line.Signage.v버전.exe.blockmap
 dist\latest.yml
 ```
 
@@ -111,4 +111,4 @@ dist\latest.yml
 - `gh auth status`에서 token invalid가 나오면 `gh auth login`을 다시 실행합니다.
 - 같은 버전 태그가 이미 다른 커밋에 있으면 `package.json` 버전을 올린 뒤 다시 배포합니다.
 - Release는 만들어졌는데 자동 업데이트가 안 되면 `latest.yml`이 Release asset에 포함되어 있는지 확인합니다.
-- 설치 파일명은 반드시 `Jinjeop Line Signage v버전.exe` 형식이어야 합니다.
+- 설치 파일명은 반드시 `Jinjeop.Line.Signage.v버전.exe` 형식이어야 합니다.

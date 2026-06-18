@@ -60,8 +60,8 @@ if not defined APP_VERSION (
 )
 
 set "TAG=v%APP_VERSION%"
-set "INSTALLER=dist\Jinjeop Line Signage v%APP_VERSION%.exe"
-set "BLOCKMAP=dist\Jinjeop Line Signage v%APP_VERSION%.exe.blockmap"
+set "INSTALLER=dist\Jinjeop.Line.Signage.v%APP_VERSION%.exe"
+set "BLOCKMAP=dist\Jinjeop.Line.Signage.v%APP_VERSION%.exe.blockmap"
 set "LATEST=dist\latest.yml"
 set "NOTES=RELEASE_NOTES.md"
 
