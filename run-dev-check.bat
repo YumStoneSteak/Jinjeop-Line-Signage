@@ -2,6 +2,7 @@
 setlocal
 
 cd /d "%~dp0"
+chcp 65001 >nul
 
 where node >nul 2>&1
 if errorlevel 1 (
@@ -10,7 +11,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-where npm >nul 2>&1
+where npm.cmd >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] npm was not found. Install Node.js LTS first.
   pause
@@ -25,7 +26,7 @@ if not exist "package.json" (
 
 if not exist "node_modules\electron\dist\electron.exe" (
   echo Electron runtime is missing. Installing dependencies first...
-  call npm install
+  call npm.cmd install
   if errorlevel 1 (
     echo [ERROR] Dependency installation failed.
     pause
@@ -34,7 +35,7 @@ if not exist "node_modules\electron\dist\electron.exe" (
 )
 
 echo Running maintenance schedule verification...
-call npm run verify:maintenance
+call npm.cmd run verify:maintenance
 if errorlevel 1 (
   echo [ERROR] Maintenance verification failed.
   pause
@@ -42,7 +43,7 @@ if errorlevel 1 (
 )
 
 echo Starting Jinjeop Line Signage in development mode...
-call npm start
+call npm.cmd start
 if errorlevel 1 (
   echo [ERROR] Development launch failed.
   pause

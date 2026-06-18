@@ -24,7 +24,8 @@ if not exist "node_modules\electron\dist\electron.exe" (
 )
 
 echo Building NSIS Windows installer...
-call npm run build
+set "ELECTRON_BUILDER_CACHE=%CD%\.electron-builder-cache"
+call node --preserve-symlinks --preserve-symlinks-main node_modules\electron-builder\cli.js --win nsis
 
 if errorlevel 1 (
   echo [ERROR] NSIS installer build failed.

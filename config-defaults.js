@@ -49,8 +49,7 @@
     return {
       layout: {
         splitRatio: '7:3',
-        borderEnabled: false,
-        panelSwapped: false
+        borderEnabled: false
       },
       browser: {
         url: 'https://smss.seoulmetro.co.kr/traininfo/traininfoUserView.do',
@@ -96,9 +95,9 @@
           intervalSeconds: 10
         },
         timetable: {
-          stationName: '별내별가람역',
-          stationId: '0408',
-          stationCode: '408',
+          stationName: '',
+          stationId: '',
+          stationCode: '',
           direction: '하행',
           displayFormat: 'table'
         }

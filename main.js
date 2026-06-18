@@ -45,7 +45,8 @@ const SMSS_HOST = 'smss.seoulmetro.co.kr';
 const SMSS_WEBREQUEST_FILTER = { urls: [`*://${SMSS_HOST}/*`] };
 const AUTO_START_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const APP_ID = 'kr.or.ncuc.jinjeop-line-signage';
-const DISPLAY_APP_NAME = 'Jinjeop Line Signage';
+const DISPLAY_APP_NAME = '진접선 행선안내 사이니지';
+const APP_ICON_RELATIVE_PATH = path.join('files', 'icons', 'ncuc.ico');
 const KOREAN_APP_NAME = '진접선 행선안내 사이니지';
 const AUTO_START_VALUE_NAME = 'JinjeopLineSignage';
 const LEGACY_AUTO_START_VALUE_NAMES = ['NamyangjuDashboard'];
@@ -200,7 +201,8 @@ function getSmssLogFilePath() {
   }
 
   const candidates = [
-    path.join(__dirname, 'logs', 'smss-diagnostics.log')
+    path.join(__dirname, 'logs', 'smss-diagnostics.log'),
+    path.join(app.getPath('userData'), 'logs', 'smss-diagnostics.log')
   ];
 
   for (const candidate of candidates) {
@@ -612,13 +614,12 @@ function getConfigPath() {
 }
 
 function getAppIconPath() {
-  const filesIconPath = path.join(__dirname, 'files', 'icons', 'ncuc.ico');
-  if (fs.existsSync(filesIconPath)) {
-    return filesIconPath;
-  }
+  const staticIconPaths = [
+    path.join(__dirname, APP_ICON_RELATIVE_PATH),
+    path.join(getRuntimeBasePath(), APP_ICON_RELATIVE_PATH)
+  ];
 
-  const legacyIconPath = path.join(__dirname, 'ncuc.ico');
-  return fs.existsSync(legacyIconPath) ? legacyIconPath : undefined;
+  return staticIconPaths.find((iconPath) => fs.existsSync(iconPath));
 }
 
 function getTimetableCachePath() {
@@ -738,8 +739,13 @@ function getSolarTermCachePath(yearInput) {
 }
 
 function normalizeTimetableStation(input) {
-  const code = String(input?.stationCode || input?.stationId || defaultConfig.sidebar.timetable.stationCode).replace(/^0+/, '');
-  return timetableStations[code] || timetableStations[defaultConfig.sidebar.timetable.stationCode];
+  const rawCode = input?.stationCode || input?.stationId || '';
+  const code = String(rawCode).replace(/^0+/, '');
+  return timetableStations[code] || {
+    stationName: '',
+    stationId: '',
+    stationCode: ''
+  };
 }
 
 function normalizeTimetableSettings(input) {
@@ -1444,8 +1450,14 @@ function fetchText(url) {
 
 async function refreshTimetableCache(stationInput) {
   const station = normalizeTimetableStation(stationInput);
-  const url = `http://www.seoulmetro.co.kr/kr/getStationInfo.do?action=time&stationId=${station.stationId}`;
   let cache = readTimetableCache();
+  if (!station.stationId || !station.stationCode) {
+    cache = appendTimetableLog(cache, '시간표 갱신 보류', '현재 역이 선택되지 않았습니다.');
+    writeTimetableCache(cache);
+    return { ok: false, cache, error: '현재 역을 먼저 선택해 주세요.' };
+  }
+
+  const url = `http://www.seoulmetro.co.kr/kr/getStationInfo.do?action=time&stationId=${station.stationId}`;
 
   try {
     const html = await fetchText(url);

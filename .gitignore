@@ -3,9 +3,11 @@ node_modules/
 
 # Build outputs
 dist/
-build/
+build/*
+!build/installer.nsh
 release/
 out/
+.electron-builder-cache/
 *.zip
 *.7z
 *.tar

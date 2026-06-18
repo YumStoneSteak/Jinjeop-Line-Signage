@@ -16,7 +16,7 @@
       </div>
 
       <div class="sidebar-widget sidebar-time-card">
-        <div id="sidebarStationName" class="sidebar-station-name">별내별가람역</div>
+        <div id="sidebarStationName" class="sidebar-station-name"></div>
         <div id="sidebarDate" class="sidebar-date">-</div>
         <div id="sidebarClock" class="sidebar-clock">--:--</div>
       </div>
@@ -109,7 +109,7 @@
     <div id="weatherUpdateStatus" class="weather-update-status">날씨 업데이트 대기 중</div>
 
     <header id="toolbar">
-      <div id="toolbarTitle" class="toolbar-title">진접선 행선안내 사이니지 (v2.1.0)</div>
+      <div id="toolbarTitle" class="toolbar-title">진접선 행선안내 사이니지 (v2.2.1)</div>
       <div class="toolbar-actions">
         <button id="btnScreenSettings" type="button" title="일반 설정" aria-label="일반 설정">일반 설정</button>
         <button id="btnSidebarSettings" type="button" title="위젯" aria-label="위젯">위젯</button>
@@ -143,9 +143,22 @@
     <main id="splitRoot">
       <section id="panelBrowser" class="panel">
         <div class="browser-title-cluster">
-          <div id="browserTitleWidget" class="panel-title-widget browser-title-widget" role="button" tabindex="0" title="클릭 시 새로고침 & 4호선 선택">
-            <span class="browser-title-main">진접선 열차 위치 정보</span>
-            <span class="browser-title-hint" aria-hidden="true">클릭 시 새로고침 & 4호선 선택</span>
+          <div class="browser-title-stack">
+            <div id="browserTitleWidget" class="panel-title-widget browser-title-widget" role="button" tabindex="0" title="클릭 시 새로고침, 4호선 선택, 확대, 드래그 보정">
+              <span class="browser-title-main">진접선 열차 위치 정보</span>
+              <span class="browser-title-hint" aria-hidden="true">새로고침 · 4호선 · 확대 · 드래그 보정</span>
+            </div>
+            <div class="panel-title-widget train-direction-legend" aria-label="진접선 열차 방향 안내 범례">
+              <div class="train-direction-row">
+                <img class="train-direction-icon" src="../files/icons/line4_down_icon.png" alt="" aria-hidden="true" />
+                <span>사당 방면 열차</span>
+              </div>
+              <div class="train-direction-line" aria-hidden="true"></div>
+              <div class="train-direction-row">
+                <img class="train-direction-icon" src="../files/icons/line4_up_icon.png" alt="" aria-hidden="true" />
+                <span>진접 방면 열차</span>
+              </div>
+            </div>
           </div>
           <div id="zoomStatus" class="zoom-status">125%</div>
         </div>
@@ -225,13 +238,17 @@
       <section class="settings-section">
         <h3>다음 열차 설정</h3>
         <div class="form-grid">
-          <label>현재 역
-            <select id="selectTrainStation">
+          <label id="trainStationField">현재 역
+            <select id="selectTrainStation" required>
+              <option value="">현재 역 선택(필수)</option>
               <option value="408">별내별가람역</option>
               <option value="406">오남역</option>
               <option value="405">진접역</option>
             </select>
           </label>
+          <p id="stationRequiredMessage" class="settings-note station-required-message hidden">
+            현재 역은 필수 설정입니다. 역을 선택한 뒤 저장해야 다른 기능을 사용할 수 있습니다.
+          </p>
 
           <label>표시 방향
             <select id="selectTrainDirection">
@@ -287,7 +304,6 @@
             </select>
           </label>
 
-          <label class="checkbox-row"><input id="checkSwap" type="checkbox" /> 패널 좌우 전환</label>
         </div>
       </section>
 
@@ -335,15 +351,15 @@
         <div class="form-grid">
           <label class="checkbox-row wide-field">
             <input id="checkAutoUpdateEnabled" type="checkbox" />
-            <span>GitHub 릴리즈 자동 업데이트</span>
+            <span>자동 업데이트</span>
           </label>
           <label>업데이트 시간
             <input id="inputUpdateTime" type="time" />
           </label>
-          <label>꺼지는 시간
+          <label>PC 종료 시간
             <input id="inputUnavailableStartTime" type="time" />
           </label>
-          <label>켜지는 시간
+          <label>PC 부팅 시간
             <input id="inputUnavailableEndTime" type="time" />
           </label>
           <p id="maintenanceStatus" class="settings-note wide-field">운영 시간 확인 중</p>
@@ -358,12 +374,12 @@
       <section class="settings-section">
         <h3>관리</h3>
         <div class="form-grid">
-          <label class="checkbox-row wide-field admin-option-row" data-tooltip="제작: 철도지원부 이동혁 대리. 2026. 4. 24." aria-label="관리자 옵션. 제작: 철도지원부 이동혁 대리. 2026. 4. 24.">
+          <label class="checkbox-row wide-field admin-option-row" aria-label="관리자 옵션">
             <input id="checkAdminOptions" type="checkbox" />
             <span>관리자 옵션</span>
           </label>
           <p class="settings-note wide-field">불필요 옵션이 표시됩니다.</p>
-          <p id="appVersionText" class="settings-note wide-field">현재 버전: v2.1.0</p>
+          <p id="appVersionText" class="settings-note wide-field">현재 버전: v2.2.1</p>
         </div>
       </section>
 
@@ -446,6 +462,7 @@
 
     <script src="../config-defaults.js"></script>
     <script src="../maintenance-utils.js"></script>
+    <script src="../settings-help.js"></script>
     <script src="../air-quality.js"></script>
     <script src="renderer.js"></script>
   </body>

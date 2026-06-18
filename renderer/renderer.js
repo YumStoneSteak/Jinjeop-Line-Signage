@@ -13,6 +13,7 @@ const {
   getDelayUntilUnavailableWindowEnds,
   getUnavailableWindowLabel
 } = window.dashboardMaintenanceUtils;
+const SETTING_HELP_TEXTS = window.dashboardSettingsHelp || {};
 const { getKoreanAirQuality } = window.dashboardAirQuality;
 const fallbackDailyAdvice = {
   message: '오늘도 좋은 하루 보내세요.',
@@ -22,6 +23,10 @@ const fallbackDailyAdvice = {
 const SEOUL_METRO_TRAIN_INFO_URL = 'https://smss.seoulmetro.co.kr/traininfo/traininfoUserView.do';
 const KOREAN_APP_NAME = '진접선 행선안내 사이니지';
 const STARTUP_STATUS_TIMEOUT_MS = 5000;
+const SMSS_LOAD_TIMEOUT_MS = 18000;
+const LINE4_ACTIVATION_RETRY_LIMIT = 10;
+const LINE4_ACTIVATION_RETRY_DELAY_MS = 650;
+const LINE4_IN_PAGE_ZOOM_CLICKS = 2;
 
 const solarTermDescriptions = {
   '입춘': '🌸 만물이 소생하는 봄의 시작을 알립니다!',
@@ -57,6 +62,7 @@ const trainStations = {
   '406': { stationName: '오남역', stationId: '0406', stationCode: '406', latitude: 37.705096, longitude: 127.192925 },
   '405': { stationName: '진접역', stationId: '0405', stationCode: '405', latitude: 37.720618, longitude: 127.203556 }
 };
+const emptyTrainStation = { stationName: '', stationId: '', stationCode: '', latitude: null, longitude: null };
 
 const state = {
   appVersion: '',
@@ -97,6 +103,8 @@ const state = {
   autoLine4Triggered: false,
   autoLine4TargetUrl: '',
   pendingLine4ZoomInClicks: 0,
+  line4SequenceInProgress: false,
+  line4SequenceRunId: 0,
   browserRequestedUrl: '',
   dragRecordInProgress: false,
   dragRecordRequestId: 0,
@@ -105,7 +113,8 @@ const state = {
   smssLayoutFullscreenState: null,
   maintenanceResumeTimer: null,
   maintenanceStatusTimer: null,
-  updateStatus: null
+  updateStatus: null,
+  stationRequirementActive: false
 };
 
 const els = {
@@ -173,7 +182,9 @@ const els = {
   playlistTBody: document.querySelector('#playlistTable tbody'),
 
   sidebarPanel: document.getElementById('sidebarPanel'),
+  trainStationField: document.getElementById('trainStationField'),
   selectTrainStation: document.getElementById('selectTrainStation'),
+  stationRequiredMessage: document.getElementById('stationRequiredMessage'),
   selectTrainDirection: document.getElementById('selectTrainDirection'),
   selectTimetableDisplayFormat: document.getElementById('selectTimetableDisplayFormat'),
   btnRefreshTimetable: document.getElementById('btnRefreshTimetable'),
@@ -231,7 +242,6 @@ const els = {
   dragReplayStatus: document.getElementById('dragReplayStatus'),
   selectSplitRatio: document.getElementById('selectSplitRatio'),
   selectTransition: document.getElementById('selectTransition'),
-  checkSwap: document.getElementById('checkSwap'),
   checkAlwaysOnTop: document.getElementById('checkAlwaysOnTop'),
   checkPreventMin: document.getElementById('checkPreventMin'),
   checkAutoStart: document.getElementById('checkAutoStart'),
@@ -280,7 +290,7 @@ function normalizeForSave(config) {
     autoRefresh: normalizeTrainInfoAutoRefreshSettings(clone.browser?.autoRefresh)
   };
   clone.layout = {
-    ...clone.layout,
+    splitRatio: clone.layout?.splitRatio || defaultConfig.layout.splitRatio,
     borderEnabled: false
   };
   clone.window = normalizeWindowSettings(clone.window);
@@ -395,8 +405,9 @@ function parseRatio(splitRatio) {
 }
 
 function normalizeTrainStation(input) {
-  const code = String(input?.stationCode || input?.stationId || defaultConfig.sidebar.timetable.stationCode).replace(/^0+/, '');
-  return trainStations[code] || trainStations[defaultConfig.sidebar.timetable.stationCode];
+  const rawCode = input?.stationCode || input?.stationId || '';
+  const code = String(rawCode).replace(/^0+/, '');
+  return trainStations[code] || emptyTrainStation;
 }
 
 function normalizeTimetableSettings(input) {
@@ -602,13 +613,19 @@ function logSmssLayoutState(event, extra = {}) {
   })}`);
 }
 
+function clearAutoLine4Timer() {
+  if (state.autoLine4Timer) {
+    clearTimeout(state.autoLine4Timer);
+    state.autoLine4Timer = null;
+  }
+}
+
 function resetAutoLine4Activation(url) {
-  clearTimeout(state.autoLine4Timer);
-  state.autoLine4Timer = null;
+  clearAutoLine4Timer();
   state.autoLine4Attempts = 0;
   state.autoLine4Triggered = false;
   state.autoLine4TargetUrl = isSeoulMetroTrainInfoUrl(url) ? normalizeUrl(url) : '';
-  state.pendingLine4ZoomInClicks = state.autoLine4TargetUrl ? 2 : 0;
+  state.pendingLine4ZoomInClicks = state.autoLine4TargetUrl ? LINE4_IN_PAGE_ZOOM_CLICKS : 0;
 }
 
 function getBrowserPopupMode() {
@@ -966,7 +983,7 @@ function applyLayout() {
   applySplitByRatio(state.draftConfig.layout.splitRatio);
   state.draftConfig.layout.borderEnabled = false;
   els.splitRoot.classList.remove('bordered');
-  els.splitRoot.classList.toggle('swapped', !!state.draftConfig.layout.panelSwapped);
+  els.splitRoot.classList.remove('swapped');
 }
 
 function normalizeZoomPercent(value) {
@@ -1049,6 +1066,204 @@ function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
 
+let activeHelpTooltipAnchor = null;
+let helpTooltipGlobalEventsBound = false;
+
+function getHelpTooltipLayer() {
+  let layer = document.getElementById('globalHelpTooltip');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.id = 'globalHelpTooltip';
+    layer.className = 'global-help-tooltip hidden';
+    layer.setAttribute('role', 'tooltip');
+    document.body.append(layer);
+  }
+  return layer;
+}
+
+function getHelpTooltipText(tooltip) {
+  return tooltip?.dataset?.tooltip || tooltip?.getAttribute('aria-label') || '';
+}
+
+function clampTooltipPosition(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function positionHelpTooltip(anchor) {
+  const text = getHelpTooltipText(anchor);
+  const layer = getHelpTooltipLayer();
+  if (!anchor || !text) {
+    layer.classList.add('hidden');
+    return;
+  }
+
+  const viewportMargin = 12;
+  layer.textContent = text;
+  layer.style.maxWidth = `${Math.max(180, Math.min(320, window.innerWidth - (viewportMargin * 2)))}px`;
+  layer.style.left = '0px';
+  layer.style.top = '0px';
+  layer.classList.remove('hidden');
+
+  const anchorRect = anchor.getBoundingClientRect();
+  const layerRect = layer.getBoundingClientRect();
+  const left = clampTooltipPosition(
+    anchorRect.left + (anchorRect.width / 2) - (layerRect.width / 2),
+    viewportMargin,
+    window.innerWidth - layerRect.width - viewportMargin
+  );
+  let top = anchorRect.top - layerRect.height - 10;
+  if (top < viewportMargin) {
+    top = anchorRect.bottom + 10;
+  }
+  top = clampTooltipPosition(top, viewportMargin, window.innerHeight - layerRect.height - viewportMargin);
+
+  layer.style.left = `${Math.round(left)}px`;
+  layer.style.top = `${Math.round(top)}px`;
+}
+
+function showHelpTooltip(event) {
+  activeHelpTooltipAnchor = event.currentTarget;
+  positionHelpTooltip(activeHelpTooltipAnchor);
+}
+
+function hideHelpTooltip(event = null) {
+  if (event && activeHelpTooltipAnchor && event.currentTarget !== activeHelpTooltipAnchor) {
+    return;
+  }
+  activeHelpTooltipAnchor = null;
+  getHelpTooltipLayer().classList.add('hidden');
+}
+
+function bindGlobalHelpTooltipEvents() {
+  if (helpTooltipGlobalEventsBound) {
+    return;
+  }
+  helpTooltipGlobalEventsBound = true;
+  window.addEventListener('resize', () => {
+    if (activeHelpTooltipAnchor) {
+      positionHelpTooltip(activeHelpTooltipAnchor);
+    }
+  });
+  document.addEventListener('scroll', () => {
+    if (activeHelpTooltipAnchor) {
+      positionHelpTooltip(activeHelpTooltipAnchor);
+    }
+  }, true);
+}
+
+function bindHelpTooltipBehavior(tooltip) {
+  if (!tooltip || tooltip.dataset.helpTooltipBound === 'true') {
+    return;
+  }
+
+  tooltip.dataset.helpTooltipBound = 'true';
+  tooltip.addEventListener('mouseenter', showHelpTooltip);
+  tooltip.addEventListener('focus', showHelpTooltip);
+  tooltip.addEventListener('mouseleave', hideHelpTooltip);
+  tooltip.addEventListener('blur', hideHelpTooltip);
+  tooltip.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      hideHelpTooltip();
+      tooltip.blur();
+    }
+  });
+}
+
+function createHelpTooltip(text) {
+  const tooltip = document.createElement('span');
+  tooltip.className = 'tooltip-help';
+  tooltip.dataset.helpManaged = 'true';
+  tooltip.tabIndex = 0;
+  tooltip.setAttribute('aria-label', text);
+  tooltip.dataset.tooltip = text;
+  tooltip.textContent = '?';
+  bindHelpTooltipBehavior(tooltip);
+  return tooltip;
+}
+
+function setHelpTooltipText(tooltip, text) {
+  tooltip.setAttribute('aria-label', text);
+  tooltip.dataset.tooltip = text;
+  if (tooltip === activeHelpTooltipAnchor) {
+    positionHelpTooltip(tooltip);
+  }
+}
+
+function getDirectLabelTextNode(label) {
+  return [...label.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim());
+}
+
+function ensureFieldLabelHeading(label) {
+  let heading = label.querySelector(':scope > .field-label-heading');
+  if (heading) {
+    return heading;
+  }
+
+  const textNode = getDirectLabelTextNode(label);
+  const labelText = textNode ? textNode.textContent.trim() : '';
+  if (textNode) {
+    textNode.remove();
+  }
+
+  heading = document.createElement('span');
+  heading.className = 'field-label-heading';
+  if (labelText) {
+    const text = document.createElement('span');
+    text.textContent = labelText;
+    heading.append(text);
+  }
+  label.prepend(heading);
+  return heading;
+}
+
+function addHelpTooltipToLabel(label, text) {
+  if (!label || !text) {
+    return;
+  }
+
+  const existing = label.querySelector(':scope > .tooltip-help, :scope > .field-label-heading > .tooltip-help');
+  if (existing) {
+    existing.dataset.helpManaged = 'true';
+    setHelpTooltipText(existing, text);
+    return;
+  }
+
+  const tooltip = createHelpTooltip(text);
+  if (label.classList.contains('checkbox-row')) {
+    label.append(tooltip);
+    return;
+  }
+
+  ensureFieldLabelHeading(label).append(tooltip);
+}
+
+function addHelpTooltipToButton(button, text) {
+  if (!button || !text || button.dataset.helpAttached === 'true') {
+    return;
+  }
+  button.dataset.helpAttached = 'true';
+  button.insertAdjacentElement('afterend', createHelpTooltip(text));
+}
+
+function applySettingsHelpTooltips() {
+  bindGlobalHelpTooltipEvents();
+  Object.entries(SETTING_HELP_TEXTS).forEach(([controlId, text]) => {
+    const control = document.getElementById(controlId);
+    if (!control) {
+      return;
+    }
+
+    if (control.tagName === 'BUTTON') {
+      addHelpTooltipToButton(control, text);
+      return;
+    }
+
+    addHelpTooltipToLabel(control.closest('label'), text);
+  });
+
+  document.querySelectorAll('.tooltip-help').forEach(bindHelpTooltipBehavior);
+}
+
 function normalizeWindowSettings(rawSettings) {
   const defaults = defaultConfig.window || {};
   const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : {};
@@ -1103,6 +1318,7 @@ function applyBrowserSettings() {
   loadBrowserUrlInWebview(normalized);
   applyBrowserZoom();
   suppressInPagePopups();
+  scheduleAutoActivateLine4(900);
 }
 
 function applyBrowserZoom() {
@@ -1201,14 +1417,14 @@ function renderMaintenanceStatus() {
 
   const unavailableLabel = getUnavailableWindowLabel(settings);
   if (isTimeWithinUnavailableWindow(settings.updateTime, settings)) {
-    els.maintenanceStatus.textContent = `업데이트 시간이 꺼져있을 시간(${unavailableLabel}) 안에 있습니다. 자동 업데이트 시간을 앞당겨 주세요.`;
+    els.maintenanceStatus.textContent = `업데이트 시간이 자동 작업 보류 시간대(${unavailableLabel}) 안에 있습니다. 자동 업데이트 시간을 앞당겨 주세요.`;
     return;
   }
   if (isAutomaticWorkSuspended()) {
-    els.maintenanceStatus.textContent = `꺼져있을 시간(${unavailableLabel})입니다. 자동 업데이트와 자동 갱신을 보류합니다.`;
+    els.maintenanceStatus.textContent = `자동 작업 보류 시간대(${unavailableLabel})입니다. 자동 업데이트와 자동 갱신을 보류합니다.`;
     return;
   }
-  els.maintenanceStatus.textContent = `업데이트 ${settings.updateTime} / 꺼짐 ${settings.unavailableStartTime} / 켜짐 ${settings.unavailableEndTime}`;
+  els.maintenanceStatus.textContent = `업데이트 ${settings.updateTime} / PC 종료 ${settings.unavailableStartTime} / PC 부팅 ${settings.unavailableEndTime}`;
 }
 
 function formatUpdateStatus(status = state.updateStatus) {
@@ -1291,7 +1507,7 @@ function renderTrainInfoAutoRefreshStatus() {
   }
 
   const baseText = settings.enabled && isAutomaticWorkSuspended()
-    ? `자동 새로고침: 꺼져있을 시간(${getUnavailableWindowLabel(getDraftMaintenanceSettings())})이라 보류`
+    ? `자동 새로고침: 자동 작업 보류 시간대(${getUnavailableWindowLabel(getDraftMaintenanceSettings())})라 보류`
     : settings.enabled
       ? `자동 새로고침: ${formatTrainInfoAutoRefreshHours(settings.intervalHours)}마다 실행`
       : '자동 새로고침: 꺼짐';
@@ -1346,7 +1562,7 @@ async function runTrainInfoAutoRefresh() {
     time: state.trainInfoAutoRefreshLastRunAt,
     intervalHours: settings.intervalHours
   })}`);
-  return refreshBrowserAndActivateLine4();
+  return refreshBrowserAndActivateLine4('auto-refresh');
 }
 
 function formatDragReplayPercent(value) {
@@ -1872,6 +2088,63 @@ async function clickSmssZoomIn(times = 2) {
   }
 }
 
+function isBrowserViewLoading() {
+  try {
+    return typeof els.browserView?.isLoading === 'function' ? els.browserView.isLoading() : false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function waitForBrowserLoadComplete(timeoutMs = SMSS_LOAD_TIMEOUT_MS, { allowIdle = true } = {}) {
+  if (!els.browserView) {
+    return Promise.resolve({ status: 'missing' });
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let idleTimer = null;
+    let timeoutTimer = null;
+
+    const cleanup = () => {
+      clearTimeout(idleTimer);
+      clearTimeout(timeoutTimer);
+      els.browserView.removeEventListener('did-finish-load', onFinished);
+      els.browserView.removeEventListener('did-stop-loading', onStopped);
+      els.browserView.removeEventListener('did-fail-load', onFailed);
+    };
+    const settle = (status, event = null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve({ status, event });
+    };
+    const onFinished = (event) => settle('finished', event);
+    const onStopped = (event) => settle('stopped', event);
+    const onFailed = (event) => {
+      if (event?.isMainFrame === false) {
+        return;
+      }
+      settle(event?.errorCode === -3 ? 'aborted' : 'failed', event);
+    };
+
+    els.browserView.addEventListener('did-finish-load', onFinished);
+    els.browserView.addEventListener('did-stop-loading', onStopped);
+    els.browserView.addEventListener('did-fail-load', onFailed);
+
+    if (allowIdle) {
+      idleTimer = setTimeout(() => {
+        if (!isBrowserViewLoading()) {
+          settle('idle');
+        }
+      }, 250);
+    }
+    timeoutTimer = setTimeout(() => settle('timeout'), timeoutMs);
+  });
+}
+
 function getLine4RefreshTargetUrl() {
   const configuredUrl = normalizeUrl(state.draftConfig?.browser?.url || SEOUL_METRO_TRAIN_INFO_URL);
   if (isSeoulMetroTrainInfoUrl(configuredUrl)) {
@@ -1886,22 +2159,17 @@ function getLine4RefreshTargetUrl() {
   return SEOUL_METRO_TRAIN_INFO_URL;
 }
 
-async function refreshBrowserAndActivateLine4() {
-  if (!els.browserView) {
-    return false;
-  }
-
-  const targetUrl = getLine4RefreshTargetUrl();
-  resetAutoLine4Activation(targetUrl);
-  state.browserRequestedUrl = targetUrl;
-  logSmssLayoutState('manual-refresh-line4-request', { url: targetUrl });
-
+async function navigateBrowserForLine4(targetUrl, { reloadIfCurrent = true } = {}) {
   const currentUrl = normalizeUrl(getBrowserViewCurrentUrl() || 'about:blank');
+  let waitForLoad = null;
+  let navigationRequested = false;
 
   try {
     if (currentUrl !== targetUrl) {
       if (typeof els.browserView.loadURL === 'function') {
+        waitForLoad = waitForBrowserLoadComplete(SMSS_LOAD_TIMEOUT_MS, { allowIdle: false });
         const loadPromise = els.browserView.loadURL(targetUrl);
+        navigationRequested = true;
         if (loadPromise && typeof loadPromise.catch === 'function') {
           loadPromise.catch((err) => {
             if (err?.code !== 'ERR_ABORTED') {
@@ -1909,25 +2177,23 @@ async function refreshBrowserAndActivateLine4() {
             }
           });
         }
-        return true;
+      } else {
+        waitForLoad = waitForBrowserLoadComplete(SMSS_LOAD_TIMEOUT_MS, { allowIdle: false });
+        els.browserView.setAttribute('src', targetUrl);
+        navigationRequested = true;
       }
-
-      els.browserView.setAttribute('src', targetUrl);
-      return true;
-    }
-
-    if (typeof els.browserView.reloadIgnoringCache === 'function') {
+    } else if (reloadIfCurrent && typeof els.browserView.reloadIgnoringCache === 'function') {
+      waitForLoad = waitForBrowserLoadComplete(SMSS_LOAD_TIMEOUT_MS, { allowIdle: false });
       els.browserView.reloadIgnoringCache();
-      return true;
-    }
-
-    if (typeof els.browserView.reload === 'function') {
+      navigationRequested = true;
+    } else if (reloadIfCurrent && typeof els.browserView.reload === 'function') {
+      waitForLoad = waitForBrowserLoadComplete(SMSS_LOAD_TIMEOUT_MS, { allowIdle: false });
       els.browserView.reload();
-      return true;
-    }
-
-    if (typeof els.browserView.loadURL === 'function') {
+      navigationRequested = true;
+    } else if (reloadIfCurrent && typeof els.browserView.loadURL === 'function') {
+      waitForLoad = waitForBrowserLoadComplete(SMSS_LOAD_TIMEOUT_MS, { allowIdle: false });
       const loadPromise = els.browserView.loadURL(targetUrl);
+      navigationRequested = true;
       if (loadPromise && typeof loadPromise.catch === 'function') {
         loadPromise.catch((err) => {
           if (err?.code !== 'ERR_ABORTED') {
@@ -1935,40 +2201,146 @@ async function refreshBrowserAndActivateLine4() {
           }
         });
       }
-      return true;
     }
 
-    els.browserView.setAttribute('src', targetUrl);
-    return true;
+    const loadResult = navigationRequested
+      ? await waitForLoad
+      : { status: 'idle' };
+    logSmssLayoutState('line4-load-complete', { url: targetUrl, loadStatus: loadResult.status });
+    return loadResult.status !== 'timeout' && loadResult.status !== 'failed';
   } catch (err) {
     console.warn('Webview refresh failed:', err);
     return false;
   }
 }
 
+async function getDragReplayVerificationSnapshot() {
+  const settings = getDraftDragReplaySettings();
+  if (!settings.enabled || !settings.gesture || !els.browserView) {
+    return {
+      enabled: !!settings.enabled,
+      hasGesture: !!settings.gesture,
+      gesture: settings.gesture || null,
+      viewport: null,
+      points: null
+    };
+  }
+
+  const viewport = await getWebviewViewportSize();
+  const hostRect = els.browserView.getBoundingClientRect?.();
+  const points = gestureToViewportPoints(settings.gesture, viewport || hostRect);
+  return {
+    enabled: true,
+    hasGesture: true,
+    gesture: settings.gesture,
+    viewport: viewport || (hostRect ? {
+      width: Math.round(hostRect.width),
+      height: Math.round(hostRect.height)
+    } : null),
+    points
+  };
+}
+
+async function runLine4DisplaySequence(reason = 'manual') {
+  if (!els.browserView || !state.autoLine4TargetUrl) {
+    return false;
+  }
+
+  const runId = state.line4SequenceRunId + 1;
+  state.line4SequenceRunId = runId;
+  state.line4SequenceInProgress = true;
+  logSmssLayoutState('line4-sequence-start', { reason, url: state.autoLine4TargetUrl });
+
+  try {
+    suppressInPagePopups();
+    applyBrowserZoom();
+
+    let activated = false;
+    for (let attempt = 1; attempt <= LINE4_ACTIVATION_RETRY_LIMIT; attempt += 1) {
+      if (runId !== state.line4SequenceRunId) {
+        return false;
+      }
+      activated = await activateLine4InBrowser();
+      logSmssLayoutState('line4-activate-attempt', {
+        reason,
+        attempt,
+        activated
+      });
+      if (activated) {
+        break;
+      }
+      await delay(LINE4_ACTIVATION_RETRY_DELAY_MS);
+    }
+
+    if (!activated) {
+      state.autoLine4Triggered = false;
+      logSmssLayoutState('line4-sequence-failed', { reason, stage: 'activate-line4' });
+      return false;
+    }
+
+    await delay(300);
+    applyBrowserZoom();
+
+    const zoomInClicks = state.pendingLine4ZoomInClicks || LINE4_IN_PAGE_ZOOM_CLICKS;
+    state.pendingLine4ZoomInClicks = 0;
+    const inPageZoomApplied = zoomInClicks > 0
+      ? await clickSmssZoomIn(zoomInClicks)
+      : true;
+
+    await delay(250);
+    const dragSnapshot = await getDragReplayVerificationSnapshot();
+    const dragApplied = dragSnapshot.enabled && dragSnapshot.hasGesture
+      ? await replaySmssDragIfEnabled()
+      : true;
+
+    const completed = activated && inPageZoomApplied && dragApplied;
+    state.autoLine4Triggered = completed;
+    logSmssLayoutState(completed ? 'line4-sequence-complete' : 'line4-sequence-incomplete', {
+      reason,
+      activated,
+      browserZoomPercent: normalizeZoomPercent(state.draftConfig?.browser?.zoomPercent),
+      inPageZoomClicks: zoomInClicks,
+      inPageZoomApplied,
+      dragApplied,
+      dragSnapshot
+    });
+    return completed;
+  } finally {
+    if (runId === state.line4SequenceRunId) {
+      state.line4SequenceInProgress = false;
+    }
+  }
+}
+
+async function refreshBrowserAndActivateLine4(reason = 'manual-refresh') {
+  if (!els.browserView) {
+    return false;
+  }
+
+  const targetUrl = getLine4RefreshTargetUrl();
+  resetAutoLine4Activation(targetUrl);
+  state.browserRequestedUrl = targetUrl;
+  logSmssLayoutState('line4-refresh-request', { reason, url: targetUrl });
+
+  await navigateBrowserForLine4(targetUrl, { reloadIfCurrent: true });
+  return runLine4DisplaySequence(reason);
+}
+
 function scheduleAutoActivateLine4(delay = 700) {
-  if (!state.autoLine4TargetUrl || state.autoLine4Triggered) {
+  if (!state.autoLine4TargetUrl || state.autoLine4Triggered || state.line4SequenceInProgress) {
     return;
   }
 
-  clearTimeout(state.autoLine4Timer);
+  clearAutoLine4Timer();
   state.autoLine4Timer = setTimeout(async () => {
-    if (!state.autoLine4TargetUrl || state.autoLine4Triggered) {
+    if (!state.autoLine4TargetUrl || state.autoLine4Triggered || state.line4SequenceInProgress) {
       return;
     }
 
     state.autoLine4Attempts += 1;
-    const activated = await activateLine4InBrowser();
-    if (activated) {
-      const zoomInClicks = state.pendingLine4ZoomInClicks;
-      state.pendingLine4ZoomInClicks = 0;
-      if (zoomInClicks > 0) {
-        await clickSmssZoomIn(zoomInClicks);
-      }
-      await replaySmssDragIfEnabled();
-      state.autoLine4Triggered = true;
-      clearTimeout(state.autoLine4Timer);
-      state.autoLine4Timer = null;
+    const completed = await runLine4DisplaySequence('auto-load');
+    if (completed) {
+      clearAutoLine4Timer();
       return;
     }
 
@@ -2452,14 +2824,13 @@ function applySettingsToForm() {
   updatePopupModeVisibility();
   els.selectSplitRatio.value = state.draftConfig.layout.splitRatio;
   els.selectTransition.value = state.draftConfig.player.transition;
-  els.checkSwap.checked = !!state.draftConfig.layout.panelSwapped;
   els.checkAlwaysOnTop.checked = !!state.draftConfig.window.alwaysOnTop;
   els.checkPreventMin.checked = !!state.draftConfig.window.preventMinimize;
   if (els.checkAdminOptions) {
     els.checkAdminOptions.checked = !!state.draftConfig.ui?.adminOptionsEnabled;
   }
   if (els.appVersionText) {
-    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.1.0'}`;
+    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.2.1'}`;
   }
   if (els.checkAutoStart) {
     els.checkAutoStart.checked = !!state.draftConfig.window.autoStart;
@@ -2503,6 +2874,7 @@ function applySettingsToForm() {
   updateStationDisplayName();
   renderTimetableSettingsStatus();
   updateAdminOptionVisibility();
+  updateStationRequirementUi();
   refreshStartupStatus().catch(() => {});
 
 }
@@ -2599,14 +2971,109 @@ function clampSidebarWidth(width) {
   return Math.min(420, Math.max(220, Math.round(numeric)));
 }
 
+function isStationSelectedInConfig(config) {
+  return !!normalizeTimetableSettings(config?.sidebar?.timetable).stationCode;
+}
+
+function isRequiredStationSaved() {
+  return isStationSelectedInConfig(state.savedConfig);
+}
+
+function isRequiredStationDraftSelected() {
+  return isStationSelectedInConfig(state.draftConfig);
+}
+
+function setStationRequiredMessage(message) {
+  if (!els.stationRequiredMessage) {
+    return;
+  }
+  els.stationRequiredMessage.textContent = message || '현재 역은 필수 설정입니다. 역을 선택한 뒤 저장해야 다른 기능을 사용할 수 있습니다.';
+  els.stationRequiredMessage.classList.remove('hidden');
+}
+
+function updateStationRequirementUi(message = '') {
+  if (!state.draftConfig || !els.sidebarPanel) {
+    return false;
+  }
+
+  const savedSelected = isRequiredStationSaved();
+  const draftSelected = isRequiredStationDraftSelected();
+  const required = !savedSelected || !draftSelected;
+  state.stationRequirementActive = required;
+  document.body.classList.toggle('station-required-active', required);
+  els.sidebarPanel.classList.toggle('station-required-mode', required);
+  els.trainStationField?.classList.toggle('station-required-field', required && !draftSelected);
+  if (els.selectTrainStation) {
+    els.selectTrainStation.required = true;
+    els.selectTrainStation.setAttribute('aria-required', 'true');
+    els.selectTrainStation.setAttribute('aria-invalid', required && !draftSelected ? 'true' : 'false');
+  }
+
+  if (required) {
+    [els.settingsPanel, els.trainInfoPanel, els.filePanel].forEach((panel) => panel?.classList.add('hidden'));
+    els.sidebarPanel.classList.remove('hidden');
+    setStationRequiredMessage(message || (draftSelected
+      ? '현재 역을 저장해야 다른 기능을 사용할 수 있습니다. 저장 버튼을 눌러 주세요.'
+      : '현재 역은 필수 설정입니다. 역을 선택한 뒤 저장해야 다른 기능을 사용할 수 있습니다.'));
+    if (els.btnSaveSidebarSettings) {
+      els.btnSaveSidebarSettings.disabled = !draftSelected;
+    }
+    if (els.btnCloseSidebarPanel) {
+      els.btnCloseSidebarPanel.disabled = true;
+    }
+    if (els.btnResetSidebarDefaults) {
+      els.btnResetSidebarDefaults.disabled = true;
+    }
+    if (els.btnRefreshTimetable) {
+      els.btnRefreshTimetable.disabled = !draftSelected;
+    }
+  } else {
+    els.stationRequiredMessage?.classList.add('hidden');
+    [els.btnSaveSidebarSettings, els.btnCloseSidebarPanel, els.btnResetSidebarDefaults, els.btnRefreshTimetable].forEach((button) => {
+      if (button) {
+        button.disabled = false;
+      }
+    });
+  }
+
+  updateToolbarVisibility();
+  return required;
+}
+
+function enforceRequiredStationSelection(message = '') {
+  const required = updateStationRequirementUi(message);
+  if (required) {
+    markUserActive();
+    setTimeout(() => els.selectTrainStation?.focus(), 0);
+    return false;
+  }
+  return true;
+}
+
 function setPanelVisible(panelEl, visible) {
+  if (state.stationRequirementActive && panelEl === els.sidebarPanel && !visible) {
+    enforceRequiredStationSelection('현재 역을 저장해야 위젯 설정창을 닫을 수 있습니다.');
+    return;
+  }
+  if (state.stationRequirementActive && visible && panelEl !== els.sidebarPanel) {
+    enforceRequiredStationSelection();
+    return;
+  }
   panelEl.classList.toggle('hidden', !visible);
   updateToolbarVisibility();
   markUserActive();
 }
 
 function toggleExclusivePanel(panelEl) {
+  if (state.stationRequirementActive && panelEl !== els.sidebarPanel) {
+    enforceRequiredStationSelection();
+    return;
+  }
   const shouldOpen = panelEl.classList.contains('hidden');
+  if (state.stationRequirementActive && panelEl === els.sidebarPanel && !shouldOpen) {
+    enforceRequiredStationSelection('현재 역을 저장해야 위젯 설정창을 닫을 수 있습니다.');
+    return;
+  }
   [els.settingsPanel, els.sidebarPanel, els.trainInfoPanel, els.filePanel].forEach((panel) => {
     if (!panel) {
       return;
@@ -2646,7 +3113,7 @@ function getCurrentStationDisplayName() {
 
 function getSelectedStationWeatherLocation() {
   const settings = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable);
-  return trainStations[settings.stationCode] || trainStations[defaultConfig.sidebar.timetable.stationCode];
+  return trainStations[settings.stationCode] || null;
 }
 
 function updateStationDisplayName() {
@@ -2843,6 +3310,7 @@ async function saveSettingsToDisk() {
   renderPlaylist();
   showSlide(state.currentIndex);
   updateBackgroundWidgetTasks();
+  updateStationRequirementUi();
 }
 
 function applyDraftConfigToUI({ firstSlide = false } = {}) {
@@ -2855,6 +3323,7 @@ function applyDraftConfigToUI({ firstSlide = false } = {}) {
   updateBackgroundWidgetTasks();
   renderPlaylist();
   showSlide(firstSlide ? 0 : state.currentIndex);
+  updateStationRequirementUi();
 }
 
 function createDefaultConfigForReset() {
@@ -2916,7 +3385,7 @@ function mergeUIState(oldConfig, newConfig) {
       autoRefresh: normalizeTrainInfoAutoRefreshSettings(browserConfig.autoRefresh)
     },
     layout: {
-      ...deepClone(newConfig.layout),
+      splitRatio: newConfig.layout?.splitRatio || defaultConfig.layout.splitRatio,
       borderEnabled: false
     },
     window: normalizeWindowSettings(newConfig.window),
@@ -2955,7 +3424,6 @@ function bindSettingsForm() {
     setDraftDragReplaySettings({ enabled: !!els.checkDragReplayEnabled?.checked });
     state.draftConfig.layout.splitRatio = els.selectSplitRatio.value;
     state.draftConfig.layout.borderEnabled = false;
-    state.draftConfig.layout.panelSwapped = els.checkSwap.checked;
     state.draftConfig.player.transition = normalizeTransition(els.selectTransition.value);
     state.draftConfig.ui = normalizeUiSettings({
       ...(state.draftConfig.ui || {}),
@@ -3015,7 +3483,6 @@ function bindSettingsForm() {
     els.checkAdminOptions,
     els.selectSplitRatio,
     els.selectTransition,
-    els.checkSwap,
     els.checkAlwaysOnTop,
     els.checkPreventMin,
     els.checkAutoStart,
@@ -3076,7 +3543,7 @@ function bindSettingsForm() {
 function bindToolbarAndPanels() {
   if (els.browserTitleWidget) {
     els.browserTitleWidget.addEventListener('click', () => {
-      refreshBrowserAndActivateLine4();
+      refreshBrowserAndActivateLine4('manual-click');
     });
 
     els.browserTitleWidget.addEventListener('keydown', (event) => {
@@ -3084,11 +3551,15 @@ function bindToolbarAndPanels() {
         return;
       }
       event.preventDefault();
-      refreshBrowserAndActivateLine4();
+      refreshBrowserAndActivateLine4('manual-keyboard');
     });
   }
 
   els.btnFullscreen.addEventListener('click', async () => {
+    if (state.stationRequirementActive) {
+      enforceRequiredStationSelection();
+      return;
+    }
     state.isFullscreen = await window.desktopAPI.toggleFullscreen();
     updateToolbarVisibility();
   });
@@ -3150,10 +3621,19 @@ function bindToolbarAndPanels() {
   });
 
   els.btnCloseSidebarPanel.addEventListener('click', () => {
+    if (state.stationRequirementActive) {
+      enforceRequiredStationSelection('현재 역을 저장해야 위젯 설정창을 닫을 수 있습니다.');
+      return;
+    }
     setPanelVisible(els.sidebarPanel, false);
   });
 
   els.btnSaveSidebarSettings.addEventListener('click', async () => {
+    updateSidebarSettingsFromForm();
+    if (!isRequiredStationDraftSelected()) {
+      enforceRequiredStationSelection('현재 역을 선택해야 저장할 수 있습니다.');
+      return;
+    }
     await saveSettingsToDisk();
     setPanelVisible(els.sidebarPanel, false);
   });
@@ -3396,6 +3876,7 @@ function updateSidebarSettingsFromForm() {
   updateBackgroundWidgetTasks({ forceWeather: stationChanged });
   updateStationDisplayName();
   renderTimetableSettingsStatus();
+  updateStationRequirementUi();
   syncDraftState().catch(() => {});
 }
 
@@ -3517,7 +3998,8 @@ function bindWebviewPopupHandling() {
     syncWebviewPopupPermission();
     applyBrowserZoom();
     suppressInPagePopups();
-  }, { once: true });
+    scheduleAutoActivateLine4(900);
+  });
 
   els.browserView.addEventListener('did-finish-load', () => {
     logSmssLayoutState('webview-did-finish-load');
@@ -3654,6 +4136,10 @@ function bindFullscreenInteractions() {
 }
 
 function togglePause() {
+  if (state.stationRequirementActive) {
+    enforceRequiredStationSelection();
+    return;
+  }
   state.isPaused = !state.isPaused;
 
   if (state.isPaused) {
@@ -3885,6 +4371,9 @@ function clearNextTrainWidget() {
 
 function getSelectedStationCache() {
   const settings = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable);
+  if (!settings.stationCode) {
+    return null;
+  }
   return state.timetableCache?.stations?.[settings.stationCode] || null;
 }
 
@@ -3897,6 +4386,11 @@ function updateNextTrainWidget() {
     }
 
     const settings = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable);
+    if (!settings.stationCode) {
+      clearNextTrainWidget();
+      renderTimetableSettingsStatus();
+      return;
+    }
     const stationCache = getSelectedStationCache();
     if (!stationCache || state.timetableRefreshFailed) {
       clearNextTrainWidget();
@@ -3994,6 +4488,12 @@ function syncTimetableUpdates() {
     return;
   }
 
+  if (!isStationSelectedInConfig(state.draftConfig)) {
+    clearNextTrainWidget();
+    renderTimetableSettingsStatus();
+    return;
+  }
+
   ensureTimetableCacheLoaded()
     .then(() => {
       if (!isSidebarWidgetVisible('trainSchedule')) {
@@ -4016,12 +4516,21 @@ function getTimetableLogs() {
 }
 
 function renderTimetableSettingsStatus() {
+  const stationSelected = isStationSelectedInConfig(state.draftConfig);
   if (els.timetableLastUpdated) {
-    const stationCache = getSelectedStationCache();
-    els.timetableLastUpdated.textContent = `시간표 마지막 갱신: ${formatDateTime(stationCache?.updatedAt || state.timetableCache?.updatedAt)}`;
+    if (!stationSelected) {
+      els.timetableLastUpdated.textContent = '시간표 마지막 갱신: 현재 역을 선택해 주세요.';
+    } else {
+      const stationCache = getSelectedStationCache();
+      els.timetableLastUpdated.textContent = `시간표 마지막 갱신: ${formatDateTime(stationCache?.updatedAt || state.timetableCache?.updatedAt)}`;
+    }
   }
 
   if (els.timetableErrorLog) {
+    if (!stationSelected) {
+      els.timetableErrorLog.textContent = '현재 역 선택 필요';
+      return;
+    }
     const logs = getTimetableLogs();
     if (!logs.length) {
       els.timetableErrorLog.textContent = '오류 없음';
@@ -4102,6 +4611,10 @@ async function refreshTimetableManually() {
   }
 
   const settings = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable);
+  if (!settings.stationCode) {
+    enforceRequiredStationSelection('현재 역을 먼저 선택하고 저장해 주세요.');
+    return;
+  }
   const originalText = els.btnRefreshTimetable.textContent;
   els.btnRefreshTimetable.disabled = true;
   els.btnRefreshTimetable.textContent = '갱신 중...';
@@ -4740,6 +5253,11 @@ async function updateWeather() {
   }
 
   const station = getSelectedStationWeatherLocation();
+  if (!station) {
+    state.weatherLastUpdatedAt = null;
+    updateStatusToast();
+    return;
+  }
   const requestStationCode = station.stationCode;
   const latitude = station.latitude;
   const longitude = station.longitude;
@@ -4751,13 +5269,13 @@ async function updateWeather() {
     if (!forecastResponse.ok || !airResponse.ok) {
       throw new Error('Weather request failed');
     }
-    if (!isSidebarWidgetVisible('weather') || getSelectedStationWeatherLocation().stationCode !== requestStationCode) {
+    if (!isSidebarWidgetVisible('weather') || getSelectedStationWeatherLocation()?.stationCode !== requestStationCode) {
       return;
     }
 
     const forecast = await forecastResponse.json();
     const air = await airResponse.json();
-    if (!isSidebarWidgetVisible('weather') || getSelectedStationWeatherLocation().stationCode !== requestStationCode) {
+    if (!isSidebarWidgetVisible('weather') || getSelectedStationWeatherLocation()?.stationCode !== requestStationCode) {
       return;
     }
     const current = forecast.current || {};
@@ -4919,6 +5437,7 @@ async function init() {
   }
 
   setupSidebarSettingsPanel();
+  applySettingsHelpTooltips();
   bindToolbarAndPanels();
   bindSettingsForm();
   bindSidebarSettingsForm();

@@ -1,31 +1,40 @@
 {
   "name": "jinjeop-line-signage",
-  "version": "2.1.0",
-  "description": "Jinjeop Line Signage Electron app",
+  "version": "2.2.1",
+  "description": "진접선 행선안내 사이니지 Electron app",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "verify:maintenance": "node scripts/verify-maintenance.js",
-    "build": "electron-builder --win nsis",
-    "build:nsis": "electron-builder --win nsis"
+    "verify:maintenance": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-maintenance.js",
+    "build": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js",
+    "build:nsis": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js"
   },
   "build": {
     "appId": "kr.or.ncuc.jinjeop-line-signage",
     "productName": "Jinjeop Line Signage",
-    "artifactName": "${productName} Setup ${version}.${ext}",
+    "artifactName": "Jinjeop Line Signage v${version}.${ext}",
+    "toolsets": {
+      "winCodeSign": "1.1.0"
+    },
     "icon": "files/icons/ncuc.ico",
     "win": {
       "icon": "files/icons/ncuc.ico",
       "executableName": "Jinjeop Line Signage",
-      "signAndEditExecutable": false,
       "target": [
         "nsis"
       ]
     },
     "nsis": {
+      "artifactName": "Jinjeop Line Signage v${version}.${ext}",
+      "include": "build/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "shortcutName": "Jinjeop Line Signage"
+      "installerIcon": "files/icons/ncuc.ico",
+      "uninstallerIcon": "files/icons/ncuc.ico",
+      "installerHeaderIcon": "files/icons/ncuc.ico",
+      "createDesktopShortcut": "always",
+      "shortcutName": "진접선 행선안내 사이니지 v${version}",
+      "uninstallDisplayName": "Jinjeop Line Signage"
     },
     "publish": [
       {
