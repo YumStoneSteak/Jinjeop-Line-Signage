@@ -1,6 +1,6 @@
 {
   "name": "jinjeop-line-signage",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "진접선 행선안내 사이니지 Electron app",
   "main": "main.js",
   "scripts": {

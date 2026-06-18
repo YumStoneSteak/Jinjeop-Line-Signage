@@ -4,18 +4,19 @@
 
 ## 현재 버전
 
-v2.2.1
+v2.3.0
 
-## v2.2.1 주요 변경
+## v2.3.0 주요 변경
 
 - 설치 파일, 앱 실행 파일, 제거 표시명을 영문 `Jinjeop Line Signage` 기준으로 되돌렸습니다.
-- NSIS 설치 파일명은 `Jinjeop Line Signage v2.2.1.exe` 형식으로 생성됩니다.
-- 바탕화면 바로가기는 `진접선 행선안내 사이니지 v2.2.1` 형식으로 생성됩니다.
+- NSIS 설치 파일명은 `Jinjeop Line Signage v2.3.0.exe` 형식으로 생성됩니다.
+- 바탕화면 바로가기는 `진접선 행선안내 사이니지 v2.3.0` 형식으로 생성됩니다.
 - 바탕화면 바로가기 아이콘은 내장 `ncuc.ico`를 사용합니다.
 - 첫 설치 또는 초기화 후 현재 역을 필수로 선택하고 저장해야 다른 기능을 사용할 수 있습니다.
 - 불필요한 패널 좌우 전환 기능을 제거하고, 설정 도움말 표시를 정리했습니다.
 - 진접선 열차 방향 범례 아이콘과 노선 라인 스타일을 정리했습니다.
 - 2.0.0/2.0.1/2.2.0 실행 중 업그레이드가 막히지 않도록 설치 시작 시 기존 앱 프로세스를 닫도록 보강했습니다.
+- 이후 배포를 직접 수행할 수 있도록 GitHub Release 배포 BAT와 배포 가이드를 추가했습니다.
 
 ## v2.2.0 주요 변경
 - 진접선 열차 위치 정보 제목 아래에 상선/하선 방향 안내 범례를 추가했습니다.
@@ -40,7 +41,7 @@ v2.2.1
 GitHub Release에서 받은 설치 파일을 실행합니다.
 
 ```text
-Jinjeop Line Signage v2.2.1.exe
+Jinjeop Line Signage v2.3.0.exe
 ```
 
 설치 후 시작 메뉴 또는 바탕화면 바로가기로 실행합니다.
@@ -109,8 +110,8 @@ GitHub Release까지 배포:
 빌드 결과:
 
 ```text
-dist\Jinjeop Line Signage v2.2.1.exe
-dist\Jinjeop Line Signage v2.2.1.exe.blockmap
+dist\Jinjeop Line Signage v2.3.0.exe
+dist\Jinjeop Line Signage v2.3.0.exe.blockmap
 dist\latest.yml
 ```
 

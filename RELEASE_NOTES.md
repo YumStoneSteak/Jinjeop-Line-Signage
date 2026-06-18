@@ -1,10 +1,10 @@
-# Jinjeop Line Signage v2.2.1
+# Jinjeop Line Signage v2.3.0
 
 ## 주요 변경
 
-- NSIS 설치 파일명을 `Jinjeop Line Signage v2.2.1.exe` 형식으로 정리했습니다.
+- NSIS 설치 파일명을 `Jinjeop Line Signage v2.3.0.exe` 형식으로 정리했습니다.
 - 설치 앱 실행 파일과 제거 표시명은 영문 `Jinjeop Line Signage` 기준으로 통일했습니다.
-- 바탕화면 바로가기는 `진접선 행선안내 사이니지 v2.2.1` 이름과 내장 `ncuc.ico` 아이콘을 사용합니다.
+- 바탕화면 바로가기는 `진접선 행선안내 사이니지 v2.3.0` 이름과 내장 `ncuc.ico` 아이콘을 사용합니다.
 - 2.0.0/2.0.1/2.2.0 실행 중 업그레이드가 막히지 않도록 설치 시작 시 기존 앱 프로세스를 종료합니다.
 - 첫 설치 또는 초기화 후 현재 역을 필수로 선택하고 저장해야 다른 기능을 사용할 수 있도록 했습니다.
 - 패널 좌우 전환 기능을 제거했습니다.
@@ -16,6 +16,6 @@
 
 ## 배포 파일
 
-- `Jinjeop Line Signage v2.2.1.exe`
-- `Jinjeop Line Signage v2.2.1.exe.blockmap`
+- `Jinjeop Line Signage v2.3.0.exe`
+- `Jinjeop Line Signage v2.3.0.exe.blockmap`
 - `latest.yml`
