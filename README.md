@@ -98,6 +98,14 @@ npm run build
 .\build-installer.bat
 ```
 
+GitHub Release까지 배포:
+
+```powershell
+.\release-github.bat
+```
+
+직접 배포 절차와 GitHub Desktop 사용 방법은 [RELEASE_GUIDE.md](./RELEASE_GUIDE.md)를 참고합니다.
+
 빌드 결과:
 
 ```text
