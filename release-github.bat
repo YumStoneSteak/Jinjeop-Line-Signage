@@ -52,7 +52,7 @@ if not exist "package.json" (
   exit /b 1
 )
 
-for /f "usebackq delims=" %%v in (`node -p "require('./package.json').version"`) do set "APP_VERSION=%%v"
+for /f "usebackq delims=" %%v in (`node --preserve-symlinks --preserve-symlinks-main -p "require('./package.json').version"`) do set "APP_VERSION=%%v"
 if not defined APP_VERSION (
   echo [ERROR] Could not read version from package.json.
   pause

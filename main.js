@@ -53,6 +53,49 @@ const LEGACY_AUTO_START_VALUE_NAMES = ['NamyangjuDashboard'];
 const smssDiagnosticContents = new Set();
 const smssConsoleForwardContents = new Set();
 const smokeTestMode = process.argv.includes('--smoke-test');
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleError = console.error.bind(console);
+
+function isOutputPipeError(err) {
+  return !!err && (err.code === 'EPIPE' || err.errno === 'EPIPE');
+}
+
+function ignoreOutputPipeError(err) {
+  if (isOutputPipeError(err)) {
+    return;
+  }
+  try {
+    originalConsoleError('Console output stream error:', err);
+  } catch (_) {
+    // If the output stream itself is broken, keep the app running.
+  }
+}
+
+process.stdout?.on?.('error', ignoreOutputPipeError);
+process.stderr?.on?.('error', ignoreOutputPipeError);
+
+function safeConsoleCall(fn, args) {
+  try {
+    fn(...args);
+  } catch (err) {
+    if (isOutputPipeError(err)) {
+      return;
+    }
+    try {
+      originalConsoleError('Console output failed:', err);
+    } catch (_) {
+      // Ignore secondary output failures.
+    }
+  }
+}
+
+function safeConsoleLog(...args) {
+  safeConsoleCall(originalConsoleLog, args);
+}
+
+function safeConsoleError(...args) {
+  safeConsoleCall(originalConsoleError, args);
+}
 
 app.setName(DISPLAY_APP_NAME);
 if (process.platform === 'win32') {
@@ -221,7 +264,7 @@ function getSmssLogFilePath() {
 }
 
 function writeSmssLogLine(line) {
-  console.log(line);
+  safeConsoleLog(line);
 
   const logFilePath = getSmssLogFilePath();
   if (!logFilePath) {
@@ -1561,7 +1604,7 @@ function loadConfig() {
       fs.writeFileSync(configPath, JSON.stringify(persistedConfig, null, 2), 'utf-8');
     }
   } catch (err) {
-    console.error('Failed to load config. Falling back to defaults:', err);
+    safeConsoleError('Failed to load config. Falling back to defaults:', err);
     persistedConfig = deepClone(defaultConfig);
     draftConfig = deepClone(defaultConfig);
   }
@@ -2045,7 +2088,7 @@ function flushAutoStartWarning() {
       '설정 화면에서 "Windows 시작 시 자동 실행"을 껐다가 다시 켜고 저장하면 재등록을 다시 시도합니다.'
     ].join('\n')
   }).catch((err) => {
-    console.error('Failed to show auto-start warning:', err);
+    safeConsoleError('Failed to show auto-start warning:', err);
   });
 }
 
@@ -2243,8 +2286,10 @@ function createMainWindow() {
 
   mainWindow.once('ready-to-show', () => {
     applyPresentationWindowMode();
-    mainWindow.show();
-    flushAutoStartWarning();
+    if (!smokeTestMode) {
+      mainWindow.show();
+      flushAutoStartWarning();
+    }
     if (smokeTestMode) {
       setTimeout(() => {
         bypassClosePrompt = true;

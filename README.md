@@ -4,7 +4,16 @@
 
 ## 현재 버전
 
-v2.3.0
+v2.3.1
+
+## v2.3.1 주요 변경
+
+- 첫 설치 후 현재 역명을 선택하고 저장한 직후, 위젯 설정창이 닫힌 다음 열차 위치 정보 화면의 새로고침, 4호선 선택, 확대, 드래그 보정을 한 번 더 실행하도록 수정했습니다.
+- 필수 역명 저장 시점에 설정 패널 레이아웃이 아직 열려 있어 드래그 보정 위치가 어긋날 수 있던 문제를 보완했습니다.
+- 테스트/실행 환경의 출력 파이프가 닫힐 때 SMSS 진단 로그 출력 때문에 `EPIPE` JavaScript 오류 팝업이 뜰 수 있던 문제를 방지했습니다.
+- `--smoke-test` 실행 시 사용자 화면에 흰 창을 띄우지 않고 숨김 상태로 검증 후 종료하도록 수정했습니다.
+- NSIS 설치 파일명은 `Jinjeop.Line.Signage.v2.3.1.exe` 형식으로 생성됩니다.
+- 바탕화면 바로가기는 `진접선 행선안내 사이니지 v2.3.1` 형식으로 생성됩니다.
 
 ## v2.3.0 주요 변경
 
@@ -41,7 +50,7 @@ v2.3.0
 GitHub Release에서 받은 설치 파일을 실행합니다.
 
 ```text
-Jinjeop.Line.Signage.v2.3.0.exe
+Jinjeop.Line.Signage.v2.3.1.exe
 ```
 
 설치 후 시작 메뉴 또는 바탕화면 바로가기로 실행합니다.
@@ -110,8 +119,8 @@ GitHub Release까지 배포:
 빌드 결과:
 
 ```text
-dist\Jinjeop.Line.Signage.v2.3.0.exe
-dist\Jinjeop.Line.Signage.v2.3.0.exe.blockmap
+dist\Jinjeop.Line.Signage.v2.3.1.exe
+dist\Jinjeop.Line.Signage.v2.3.1.exe.blockmap
 dist\latest.yml
 ```
 

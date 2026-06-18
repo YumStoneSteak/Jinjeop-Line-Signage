@@ -110,6 +110,7 @@ const state = {
   dragRecordRequestId: 0,
   trainInfoAutoRefreshTimer: null,
   trainInfoAutoRefreshLastRunAt: null,
+  stationSaveTrainInfoCorrectionTimer: null,
   smssLayoutFullscreenState: null,
   maintenanceResumeTimer: null,
   maintenanceStatusTimer: null,
@@ -2326,6 +2327,19 @@ async function refreshBrowserAndActivateLine4(reason = 'manual-refresh') {
   return runLine4DisplaySequence(reason);
 }
 
+function scheduleTrainInfoCorrectionAfterStationSave(reason = 'station-required-save') {
+  clearTimeout(state.stationSaveTrainInfoCorrectionTimer);
+  state.stationSaveTrainInfoCorrectionTimer = setTimeout(() => {
+    state.stationSaveTrainInfoCorrectionTimer = null;
+    if (state.stationRequirementActive) {
+      return;
+    }
+    refreshBrowserAndActivateLine4(reason).catch((err) => {
+      console.warn('Train info correction after station save failed:', err);
+    });
+  }, 1200);
+}
+
 function scheduleAutoActivateLine4(delay = 700) {
   if (!state.autoLine4TargetUrl || state.autoLine4Triggered || state.line4SequenceInProgress) {
     return;
@@ -2830,7 +2844,7 @@ function applySettingsToForm() {
     els.checkAdminOptions.checked = !!state.draftConfig.ui?.adminOptionsEnabled;
   }
   if (els.appVersionText) {
-    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.2.1'}`;
+    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.3.1'}`;
   }
   if (els.checkAutoStart) {
     els.checkAutoStart.checked = !!state.draftConfig.window.autoStart;
@@ -3634,8 +3648,14 @@ function bindToolbarAndPanels() {
       enforceRequiredStationSelection('현재 역을 선택해야 저장할 수 있습니다.');
       return;
     }
+    const wasStationRequirementActive = state.stationRequirementActive;
+    const previousSavedStationCode = normalizeTimetableSettings(state.savedConfig?.sidebar?.timetable).stationCode;
+    const nextStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
     await saveSettingsToDisk();
     setPanelVisible(els.sidebarPanel, false);
+    if (wasStationRequirementActive && !previousSavedStationCode && nextStationCode) {
+      scheduleTrainInfoCorrectionAfterStationSave();
+    }
   });
 
   els.btnResetSidebarDefaults?.addEventListener('click', async () => {
