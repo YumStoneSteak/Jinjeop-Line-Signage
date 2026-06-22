@@ -292,22 +292,6 @@
       <h2>일반 설정</h2>
 
       <section class="settings-section">
-        <h3>레이아웃</h3>
-        <div class="form-grid">
-          <label>분할 비율
-            <select id="selectSplitRatio">
-              <option value="5:5">5:5</option>
-              <option value="6:4">6:4</option>
-              <option value="7:3">7:3</option>
-              <option value="4:6">4:6</option>
-              <option value="3:7">3:7</option>
-            </select>
-          </label>
-
-        </div>
-      </section>
-
-      <section class="settings-section">
         <h3>창 동작</h3>
         <div class="form-grid">
           <label class="checkbox-row">
@@ -396,6 +380,26 @@
       <h2>열차 위치 정보</h2>
 
       <section class="settings-section">
+        <h3>레이아웃</h3>
+        <div class="form-grid">
+          <label>분할 비율
+            <select id="selectSplitRatio">
+              <option value="5:5">5:5</option>
+              <option value="6:4">6:4</option>
+              <option value="7:3">7:3</option>
+              <option value="4:6">4:6</option>
+              <option value="3:7">3:7</option>
+            </select>
+          </label>
+
+          <label class="checkbox-row wide-field">
+            <input id="checkHideNoticeWhenEmpty" type="checkbox" />
+            <span>공지 없는 경우 영역 지우기</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
         <h3>열차 위치 정보</h3>
         <div class="form-grid">
           <label>시작 URL
@@ -426,29 +430,65 @@
           <label class="checkbox-row wide-field"><input id="checkDragReplayEnabled" type="checkbox" /> 새로고침 후 드래그 보정 사용</label>
 
           <div class="wide-field drag-replay-controls">
-            <div class="drag-replay-buttons">
-              <button id="btnStartDragRecord" type="button">드래그 녹화 시작</button>
-              <button id="btnClearDragRecord" type="button">녹화 삭제</button>
-              <button id="btnSaveDragReplayDefault" type="button">기본값으로 저장</button>
-            </div>
-            <div class="drag-replay-fields">
-              <label>시작 X(%)
-                <input id="inputDragStartXPercent" type="number" min="0" max="100" step="0.1" />
-              </label>
-              <label>시작 Y(%)
-                <input id="inputDragStartYPercent" type="number" min="0" max="100" step="0.1" />
-              </label>
-              <label>끝 X(%)
-                <input id="inputDragEndXPercent" type="number" min="0" max="100" step="0.1" />
-              </label>
-              <label>끝 Y(%)
-                <input id="inputDragEndYPercent" type="number" min="0" max="100" step="0.1" />
-              </label>
-              <label>시간(ms)
-                <input id="inputDragDurationMs" type="number" min="120" max="5000" step="10" />
-              </label>
-            </div>
-            <p id="dragReplayStatus" class="settings-note">드래그 보정: 기본값 사용 중</p>
+            <section id="dragReplayProfileVisible" class="drag-replay-profile" data-profile="noticeVisible">
+              <h4>
+                공지 영역 표시 중 보정값
+                <span id="dragVisibleDefaultHelp" class="tooltip-help" tabindex="0" aria-label="기본값 확인 중" data-tooltip="기본값 확인 중">?</span>
+              </h4>
+              <div class="drag-replay-buttons">
+                <button id="btnStartDragVisibleRecord" type="button">이 상태 녹화</button>
+                <button id="btnClearDragVisibleRecord" type="button">기본값으로 되돌리기</button>
+                <button id="btnSaveDragVisibleDefault" type="button">현재값을 기본값으로 저장</button>
+              </div>
+              <div class="drag-replay-fields">
+                <label>시작 X(%)
+                  <input id="inputDragVisibleStartXPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>시작 Y(%)
+                  <input id="inputDragVisibleStartYPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>끝 X(%)
+                  <input id="inputDragVisibleEndXPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>끝 Y(%)
+                  <input id="inputDragVisibleEndYPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>시간(ms)
+                  <input id="inputDragVisibleDurationMs" type="number" min="120" max="5000" step="10" />
+                </label>
+              </div>
+              <p id="dragVisibleReplayStatus" class="settings-note">드래그 보정: 기본값 사용 중</p>
+            </section>
+
+            <section id="dragReplayProfileHidden" class="drag-replay-profile" data-profile="noticeHidden">
+              <h4>
+                공지 영역 숨김 보정값
+                <span id="dragHiddenDefaultHelp" class="tooltip-help" tabindex="0" aria-label="기본값 확인 중" data-tooltip="기본값 확인 중">?</span>
+              </h4>
+              <div class="drag-replay-buttons">
+                <button id="btnStartDragHiddenRecord" type="button">이 상태 녹화</button>
+                <button id="btnClearDragHiddenRecord" type="button">기본값으로 되돌리기</button>
+                <button id="btnSaveDragHiddenDefault" type="button">현재값을 기본값으로 저장</button>
+              </div>
+              <div class="drag-replay-fields">
+                <label>시작 X(%)
+                  <input id="inputDragHiddenStartXPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>시작 Y(%)
+                  <input id="inputDragHiddenStartYPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>끝 X(%)
+                  <input id="inputDragHiddenEndXPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>끝 Y(%)
+                  <input id="inputDragHiddenEndYPercent" type="number" min="0" max="100" step="0.1" />
+                </label>
+                <label>시간(ms)
+                  <input id="inputDragHiddenDurationMs" type="number" min="120" max="5000" step="10" />
+                </label>
+              </div>
+              <p id="dragHiddenReplayStatus" class="settings-note">드래그 보정: 기본값 사용 중</p>
+            </section>
           </div>
         </div>
       </section>

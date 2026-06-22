@@ -1107,6 +1107,15 @@ body:not(.fullscreen-active) #btnFullscreen:hover {
   border: 1px solid var(--line);
 }
 
+#splitRoot.notice-hidden {
+  grid-template-columns: 1fr !important;
+}
+
+#splitRoot.notice-hidden #divider,
+#splitRoot.notice-hidden #panelMedia {
+  display: none;
+}
+
 .panel {
   min-width: 120px;
   min-height: 120px;
@@ -1471,6 +1480,30 @@ body.station-required-active::before {
   box-shadow: 0 14px 40px rgba(127, 29, 29, 0.28);
 }
 
+#sidebarPanel.station-required-mode.station-save-required #btnSaveSidebarSettings {
+  border-color: #dc2626;
+  background: #dc2626;
+  color: #ffffff;
+  box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.18), 0 10px 24px rgba(127, 29, 29, 0.24);
+  animation: station-save-prompt 1.35s ease-in-out infinite;
+}
+
+#sidebarPanel.station-required-mode.station-save-required #btnSaveSidebarSettings:focus-visible {
+  outline: 3px solid rgba(220, 38, 38, 0.36);
+  outline-offset: 3px;
+}
+
+@keyframes station-save-prompt {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.18), 0 10px 24px rgba(127, 29, 29, 0.24);
+  }
+
+  50% {
+    box-shadow: 0 0 0 7px rgba(220, 38, 38, 0.1), 0 12px 28px rgba(127, 29, 29, 0.3);
+  }
+}
+
 #filePanel {
   width: min(760px, calc(100vw - 24px));
 }
@@ -1617,6 +1650,30 @@ h2 {
 .drag-replay-controls {
   display: grid;
   gap: 8px;
+}
+
+.drag-replay-profile {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(0, 130, 153, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.drag-replay-profile.active {
+  border-color: rgba(0, 130, 153, 0.48);
+  background: rgba(240, 253, 250, 0.92);
+}
+
+.drag-replay-profile h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 900;
 }
 
 .drag-replay-buttons {

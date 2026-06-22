@@ -1,6 +1,7 @@
 const {
   DEFAULT_LOGO_RELATIVE_PATH,
   DEFAULT_DRAG_REPLAY_GESTURE,
+  DEFAULT_HIDDEN_NOTICE_DRAG_REPLAY_GESTURE,
   SIDEBAR_WIDGET_DEFAULTS_VERSION,
   defaultSidebarWidgets,
   createDefaultConfig,
@@ -30,6 +31,11 @@ const LINE4_IN_PAGE_ZOOM_CLICKS = 2;
 const SMSS_POST_WATCHDOG_INTERVAL_MS = 5000;
 const SMSS_POST_STALE_MS = 20000;
 const SMSS_POST_RECOVERY_COOLDOWN_MS = 30000;
+const DRAG_REPLAY_PROFILE_KEYS = ['noticeVisible', 'noticeHidden'];
+const DRAG_REPLAY_PROFILE_LABELS = {
+  noticeVisible: '공지 영역 표시 중',
+  noticeHidden: '공지 영역 숨김'
+};
 
 const solarTermDescriptions = {
   '입춘': '🌸 만물이 소생하는 봄의 시작을 알립니다!',
@@ -116,10 +122,12 @@ const state = {
   browserRequestedUrl: '',
   dragRecordInProgress: false,
   dragRecordRequestId: 0,
+  dragRecordProfile: null,
   trainInfoAutoRefreshTimer: null,
   trainInfoAutoRefreshLastRunAt: null,
   stationSaveTrainInfoCorrectionTimer: null,
   smssLayoutFullscreenState: null,
+  noticePanelHidden: false,
   maintenanceResumeTimer: null,
   maintenanceStatusTimer: null,
   updateStatus: null,
@@ -240,16 +248,36 @@ const els = {
   checkTrainAutoRefreshEnabled: document.getElementById('checkTrainAutoRefreshEnabled'),
   inputTrainAutoRefreshHours: document.getElementById('inputTrainAutoRefreshHours'),
   trainAutoRefreshStatus: document.getElementById('trainAutoRefreshStatus'),
-  btnStartDragRecord: document.getElementById('btnStartDragRecord'),
-  btnClearDragRecord: document.getElementById('btnClearDragRecord'),
-  btnSaveDragReplayDefault: document.getElementById('btnSaveDragReplayDefault'),
-  inputDragStartXPercent: document.getElementById('inputDragStartXPercent'),
-  inputDragStartYPercent: document.getElementById('inputDragStartYPercent'),
-  inputDragEndXPercent: document.getElementById('inputDragEndXPercent'),
-  inputDragEndYPercent: document.getElementById('inputDragEndYPercent'),
-  inputDragDurationMs: document.getElementById('inputDragDurationMs'),
-  dragReplayStatus: document.getElementById('dragReplayStatus'),
   selectSplitRatio: document.getElementById('selectSplitRatio'),
+  checkHideNoticeWhenEmpty: document.getElementById('checkHideNoticeWhenEmpty'),
+  dragReplayProfiles: {
+    noticeVisible: {
+      panel: document.getElementById('dragReplayProfileVisible'),
+      defaultHelp: document.getElementById('dragVisibleDefaultHelp'),
+      btnStartDragRecord: document.getElementById('btnStartDragVisibleRecord'),
+      btnClearDragRecord: document.getElementById('btnClearDragVisibleRecord'),
+      btnSaveDragReplayDefault: document.getElementById('btnSaveDragVisibleDefault'),
+      inputDragStartXPercent: document.getElementById('inputDragVisibleStartXPercent'),
+      inputDragStartYPercent: document.getElementById('inputDragVisibleStartYPercent'),
+      inputDragEndXPercent: document.getElementById('inputDragVisibleEndXPercent'),
+      inputDragEndYPercent: document.getElementById('inputDragVisibleEndYPercent'),
+      inputDragDurationMs: document.getElementById('inputDragVisibleDurationMs'),
+      dragReplayStatus: document.getElementById('dragVisibleReplayStatus')
+    },
+    noticeHidden: {
+      panel: document.getElementById('dragReplayProfileHidden'),
+      defaultHelp: document.getElementById('dragHiddenDefaultHelp'),
+      btnStartDragRecord: document.getElementById('btnStartDragHiddenRecord'),
+      btnClearDragRecord: document.getElementById('btnClearDragHiddenRecord'),
+      btnSaveDragReplayDefault: document.getElementById('btnSaveDragHiddenDefault'),
+      inputDragStartXPercent: document.getElementById('inputDragHiddenStartXPercent'),
+      inputDragStartYPercent: document.getElementById('inputDragHiddenStartYPercent'),
+      inputDragEndXPercent: document.getElementById('inputDragHiddenEndXPercent'),
+      inputDragEndYPercent: document.getElementById('inputDragHiddenEndYPercent'),
+      inputDragDurationMs: document.getElementById('inputDragHiddenDurationMs'),
+      dragReplayStatus: document.getElementById('dragHiddenReplayStatus')
+    }
+  },
   selectTransition: document.getElementById('selectTransition'),
   checkAlwaysOnTop: document.getElementById('checkAlwaysOnTop'),
   checkPreventMin: document.getElementById('checkPreventMin'),
@@ -287,20 +315,53 @@ function normalizeUiSettings(rawSettings) {
   };
 }
 
+function normalizeSplitRatio(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const match = text.match(/^(\d+):(\d+)$/);
+  if (!match) {
+    return defaultConfig.layout.splitRatio;
+  }
+  const left = Number.parseInt(match[1], 10);
+  const right = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) {
+    return defaultConfig.layout.splitRatio;
+  }
+  return `${left}:${right}`;
+}
+
+function getBrowserWidthRatioFromSplitRatio(splitRatio) {
+  const [leftText, rightText] = normalizeSplitRatio(splitRatio).split(':');
+  const left = Number.parseInt(leftText, 10);
+  const right = Number.parseInt(rightText, 10);
+  const total = left + right;
+  return total > 0 ? left / total : 0.7;
+}
+
+function normalizeLayoutSettings(rawLayout) {
+  const defaults = defaultConfig.layout || { splitRatio: '7:3', hideNoticeWhenEmpty: true };
+  const source = rawLayout && typeof rawLayout === 'object' ? rawLayout : {};
+  return {
+    ...defaults,
+    ...source,
+    splitRatio: normalizeSplitRatio(source.splitRatio || defaults.splitRatio),
+    borderEnabled: false,
+    hideNoticeWhenEmpty: Object.prototype.hasOwnProperty.call(source, 'hideNoticeWhenEmpty')
+      ? !!source.hideNoticeWhenEmpty
+      : !!defaults.hideNoticeWhenEmpty
+  };
+}
+
 function normalizeForSave(config) {
   const clone = deepClone(config);
   delete clone.header;
   const playerConfig = clone.player || {};
+  clone.layout = normalizeLayoutSettings(clone.layout);
   clone.browser = {
     url: normalizeUrl(clone.browser?.url),
     popupMode: ['block', 'allow', 'current'].includes(clone.browser?.popupMode) ? clone.browser.popupMode : defaultConfig.browser.popupMode,
     zoomPercent: normalizeZoomPercent(clone.browser?.zoomPercent),
-    dragReplay: normalizeDragReplaySettings(clone.browser?.dragReplay),
+    dragReplay: normalizeDragReplaySettings(clone.browser?.dragReplay, clone.layout.splitRatio),
     autoRefresh: normalizeTrainInfoAutoRefreshSettings(clone.browser?.autoRefresh)
-  };
-  clone.layout = {
-    splitRatio: clone.layout?.splitRatio || defaultConfig.layout.splitRatio,
-    borderEnabled: false
   };
   clone.window = normalizeWindowSettings(clone.window);
   clone.ui = normalizeUiSettings(clone.ui);
@@ -342,6 +403,24 @@ function getFilename(filePath) {
 function pathToFileUrl(filePath) {
   const normalized = filePath.replace(/\\/g, '/');
   return encodeURI(`file:///${normalized}`);
+}
+
+function createPlaylistItemFromPickedMedia(picked) {
+  const filePath = typeof picked === 'string' ? picked : picked?.path;
+  if (!filePath) {
+    return null;
+  }
+
+  const ext = filePath.split('.').pop().toLowerCase();
+  const type = picked?.type === 'video' || ['mp4', 'webm'].includes(ext) ? 'video' : 'image';
+  return {
+    path: filePath,
+    type,
+    duration: type === 'video' ? 30 : 5,
+    publishStartDate: '',
+    publishEndDate: '',
+    missing: picked?.exists === false
+  };
 }
 
 function getRuntimeBaseFromDefaultLogo() {
@@ -406,7 +485,7 @@ function logoPathToSrc(value) {
 }
 
 function parseRatio(splitRatio) {
-  const [l, r] = (splitRatio || '7:3').split(':').map((x) => Number(x));
+  const [l, r] = normalizeSplitRatio(splitRatio).split(':').map((x) => Number(x));
   if (!l || !r) {
     return [7, 3];
   }
@@ -602,6 +681,22 @@ function getElementLayoutSnapshot(element) {
   };
 }
 
+function getBrowserTitleCenterDelta() {
+  const panel = document.getElementById('panelBrowser');
+  const cluster = document.querySelector('.browser-title-cluster');
+  if (!panel || !cluster) {
+    return null;
+  }
+  const panelRect = panel.getBoundingClientRect();
+  const clusterRect = cluster.getBoundingClientRect();
+  if (!panelRect.width || !clusterRect.width) {
+    return null;
+  }
+  const panelCenter = panelRect.left + (panelRect.width / 2);
+  const clusterCenter = clusterRect.left + (clusterRect.width / 2);
+  return Math.round((clusterCenter - panelCenter) * 10) / 10;
+}
+
 function logSmssLayoutState(event, extra = {}) {
   if (!shouldLogSmssLayoutState(extra.url)) {
     return;
@@ -617,6 +712,8 @@ function logSmssLayoutState(event, extra = {}) {
     body: getElementLayoutSnapshot(document.body),
     splitRoot: getElementLayoutSnapshot(els.splitRoot),
     panelBrowser: getElementLayoutSnapshot(document.getElementById('panelBrowser')),
+    browserTitleCluster: getElementLayoutSnapshot(document.querySelector('.browser-title-cluster')),
+    browserTitleCenterDelta: getBrowserTitleCenterDelta(),
     browserView: getElementLayoutSnapshot(els.browserView),
     ...extra
   })}`);
@@ -850,6 +947,60 @@ function suppressInPagePopups() {
   els.browserView.executeJavaScript(script, false).catch(() => {});
 }
 
+function clearSmssFocusArtifacts() {
+  if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
+    return;
+  }
+
+  const script = `
+    (() => {
+      const host = location.hostname || '';
+      if (!/(^|\\.)seoulmetro\\.co\\.kr$/i.test(host)) return false;
+
+      const styleId = 'dashboard-smss-focus-artifact-style';
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.textContent = [
+          '.tip[tabindex], .tip[tabindex]:focus, .tip[tabindex]:focus-visible,',
+          '[class^="T04"][tabindex], [class^="T04"][tabindex]:focus, [class^="T04"][tabindex]:focus-visible,',
+          '[class*=" T04"][tabindex], [class*=" T04"][tabindex]:focus, [class*=" T04"][tabindex]:focus-visible {',
+          '  outline: 0 !important;',
+          '  box-shadow: none !important;',
+          '}'
+        ].join('\\n');
+        (document.head || document.documentElement).appendChild(style);
+      }
+
+      const isTrainMarker = (node) => {
+        if (!node || node.nodeType !== 1 || typeof node.matches !== 'function') {
+          return false;
+        }
+        return node.matches('.tip[tabindex], [class^="T04"][tabindex], [class*=" T04"][tabindex]');
+      };
+
+      const active = document.activeElement;
+      if (isTrainMarker(active) && typeof active.blur === 'function') {
+        active.blur();
+      }
+
+      if (!window.__dashboardSmssFocusCleanupBound__) {
+        window.__dashboardSmssFocusCleanupBound__ = true;
+        document.addEventListener('focusin', (event) => {
+          const target = event.target;
+          if (isTrainMarker(target) && typeof target.blur === 'function') {
+            setTimeout(() => target.blur(), 0);
+          }
+        }, true);
+      }
+
+      return true;
+    })();
+  `;
+
+  els.browserView.executeJavaScript(script, false).catch(() => {});
+}
+
 function ratioFromPercent(leftPercent) {
   const clamped = Math.min(90, Math.max(10, leftPercent));
   let left = Math.round(clamped / 10);
@@ -962,6 +1113,7 @@ function scheduleNext(ms) {
 }
 
 function showSlide(index, options = {}) {
+  applyLayout();
   const { force = false } = options;
   const list = state.draftConfig.player.playlist;
   if (!list.length) {
@@ -1058,6 +1210,7 @@ function nextSlide() {
 async function refreshMissingFlags() {
   const list = state.draftConfig.player.playlist;
   if (!list.length) {
+    applyLayout();
     renderPlaylist();
     showSlide(0);
     await syncDraftState();
@@ -1065,28 +1218,52 @@ async function refreshMissingFlags() {
   }
 
   const validation = await window.desktopAPI.validateMediaPaths(list.map((item) => item.path));
-  const map = new Map(validation.map((v) => [v.path, v.exists]));
+  const map = new Map(validation.map((v) => [v.path, v]));
 
   state.draftConfig.player.playlist = list.map((item) => ({
     ...item,
-    missing: !map.get(item.path)
+    path: map.get(item.path)?.resolvedPath || item.path,
+    missing: !map.get(item.path)?.exists
   }));
 
+  applyLayout();
   renderPlaylist();
   showSlide(state.currentIndex);
   await syncDraftState();
 }
 
+function isNoticeAutoHideEnabled() {
+  return normalizeLayoutSettings(state.draftConfig?.layout).hideNoticeWhenEmpty;
+}
+
+function shouldHideNoticePanel() {
+  const list = state.draftConfig?.player?.playlist || [];
+  return isNoticeAutoHideEnabled() && getPlayableCount(list) === 0;
+}
+
 function applySplitByRatio(splitRatio) {
+  if (shouldHideNoticePanel()) {
+    state.noticePanelHidden = true;
+    els.splitRoot.classList.add('notice-hidden');
+    els.splitRoot.style.gridTemplateColumns = '1fr';
+    return;
+  }
+
+  state.noticePanelHidden = false;
+  els.splitRoot.classList.remove('notice-hidden');
   const [left, right] = parseRatio(splitRatio);
   els.splitRoot.style.gridTemplateColumns = `${left}fr 8px ${right}fr`;
 }
 
 function applyLayout() {
+  if (!state.draftConfig) {
+    return;
+  }
+  state.draftConfig.layout = normalizeLayoutSettings(state.draftConfig.layout);
   applySplitByRatio(state.draftConfig.layout.splitRatio);
-  state.draftConfig.layout.borderEnabled = false;
   els.splitRoot.classList.remove('bordered');
   els.splitRoot.classList.remove('swapped');
+  renderDragReplayStatus();
 }
 
 function normalizeZoomPercent(value) {
@@ -1131,20 +1308,75 @@ function normalizeDragReplayGesture(rawGesture) {
   };
 }
 
-function normalizeDragReplaySettings(rawSettings) {
-  const defaultDragReplay = defaultConfig.browser?.dragReplay || { enabled: false, gesture: null };
-  const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : defaultDragReplay;
-  const defaultGesture = normalizeDragReplayGesture(source.defaultGesture)
-    || normalizeDragReplayGesture(defaultDragReplay.defaultGesture)
-    || normalizeDragReplayGesture(defaultDragReplay.gesture)
-    || normalizeDragReplayGesture(DEFAULT_DRAG_REPLAY_GESTURE);
+function scaleDragReplayGestureForHiddenNotice(gesture, splitRatio = defaultConfig.layout.splitRatio) {
+  const normalized = normalizeDragReplayGesture(gesture);
+  if (!normalized) {
+    return null;
+  }
+  const browserWidthRatio = getBrowserWidthRatioFromSplitRatio(splitRatio);
+  return normalizeDragReplayGesture({
+    ...normalized,
+    startXRatio: normalized.startXRatio * browserWidthRatio,
+    endXRatio: normalized.endXRatio * browserWidthRatio
+  });
+}
+
+function normalizeDragReplayProfile(rawProfile, fallbackGesture) {
+  const source = rawProfile && typeof rawProfile === 'object' ? rawProfile : {};
+  const fallback = normalizeDragReplayGesture(fallbackGesture);
+  const defaultGesture = normalizeDragReplayGesture(source.defaultGesture) || fallback;
   const gesture = hasOwn(source, 'gesture')
     ? normalizeDragReplayGesture(source.gesture) || defaultGesture
     : defaultGesture;
   return {
-    enabled: !!source.enabled,
     gesture,
     defaultGesture
+  };
+}
+
+function normalizeDragReplaySettings(rawSettings, splitRatio = defaultConfig.layout.splitRatio) {
+  const defaultDragReplay = defaultConfig.browser?.dragReplay || { enabled: false, profiles: {} };
+  const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : defaultDragReplay;
+
+  const defaultVisibleGesture = normalizeDragReplayGesture(defaultDragReplay.profiles?.noticeVisible?.defaultGesture)
+    || normalizeDragReplayGesture(defaultDragReplay.profiles?.noticeVisible?.gesture)
+    || normalizeDragReplayGesture(DEFAULT_DRAG_REPLAY_GESTURE);
+  const defaultHiddenGesture = normalizeDragReplayGesture(defaultDragReplay.profiles?.noticeHidden?.defaultGesture)
+    || normalizeDragReplayGesture(defaultDragReplay.profiles?.noticeHidden?.gesture)
+    || normalizeDragReplayGesture(DEFAULT_HIDDEN_NOTICE_DRAG_REPLAY_GESTURE)
+    || scaleDragReplayGestureForHiddenNotice(defaultVisibleGesture, splitRatio);
+
+  let noticeVisible;
+  let noticeHidden;
+  if (source.profiles && typeof source.profiles === 'object') {
+    noticeVisible = normalizeDragReplayProfile(source.profiles.noticeVisible, defaultVisibleGesture);
+    noticeHidden = normalizeDragReplayProfile(
+      source.profiles.noticeHidden,
+      scaleDragReplayGestureForHiddenNotice(noticeVisible.gesture, splitRatio) || defaultHiddenGesture
+    );
+  } else {
+    const legacyDefaultGesture = normalizeDragReplayGesture(source.defaultGesture)
+      || normalizeDragReplayGesture(source.gesture)
+      || defaultVisibleGesture;
+    const legacyGesture = hasOwn(source, 'gesture')
+      ? normalizeDragReplayGesture(source.gesture) || legacyDefaultGesture
+      : legacyDefaultGesture;
+    noticeVisible = {
+      gesture: legacyGesture,
+      defaultGesture: legacyDefaultGesture
+    };
+    noticeHidden = {
+      gesture: scaleDragReplayGestureForHiddenNotice(legacyGesture, splitRatio) || defaultHiddenGesture,
+      defaultGesture: scaleDragReplayGestureForHiddenNotice(legacyDefaultGesture, splitRatio) || defaultHiddenGesture
+    };
+  }
+
+  return {
+    enabled: hasOwn(source, 'enabled') ? !!source.enabled : !!defaultDragReplay.enabled,
+    profiles: {
+      noticeVisible,
+      noticeHidden
+    }
   };
 }
 
@@ -1424,6 +1656,7 @@ function applyBrowserSettings() {
   loadBrowserUrlInWebview(normalized);
   applyBrowserZoom();
   suppressInPagePopups();
+  clearSmssFocusArtifacts();
   scheduleAutoActivateLine4(900);
 }
 
@@ -1460,28 +1693,74 @@ async function setBrowserZoomPercent(value, options = {}) {
 }
 
 function getDraftDragReplaySettings() {
-  return normalizeDragReplaySettings(state.draftConfig?.browser?.dragReplay);
+  return normalizeDragReplaySettings(
+    state.draftConfig?.browser?.dragReplay,
+    state.draftConfig?.layout?.splitRatio
+  );
 }
 
-function getDraftDragReplayDefaultGesture() {
-  return getDraftDragReplaySettings().defaultGesture
+function getDragReplayControls(profileKey) {
+  return els.dragReplayProfiles?.[profileKey] || {};
+}
+
+function getActiveDragReplayProfileKey() {
+  return state.noticePanelHidden ? 'noticeHidden' : 'noticeVisible';
+}
+
+function getDraftDragReplayProfile(profileKey = getActiveDragReplayProfileKey()) {
+  const settings = getDraftDragReplaySettings();
+  return settings.profiles?.[profileKey] || settings.profiles?.noticeVisible || {
+    gesture: normalizeDragReplayGesture(DEFAULT_DRAG_REPLAY_GESTURE),
+    defaultGesture: normalizeDragReplayGesture(DEFAULT_DRAG_REPLAY_GESTURE)
+  };
+}
+
+function getActiveDraftDragReplaySettings() {
+  const settings = getDraftDragReplaySettings();
+  const profileKey = getActiveDragReplayProfileKey();
+  const profile = getDraftDragReplayProfile(profileKey);
+  return {
+    ...settings,
+    profileKey,
+    gesture: profile.gesture,
+    defaultGesture: profile.defaultGesture
+  };
+}
+
+function getDraftDragReplayDefaultGesture(profileKey = getActiveDragReplayProfileKey()) {
+  return getDraftDragReplayProfile(profileKey).defaultGesture
     || normalizeDragReplayGesture(DEFAULT_DRAG_REPLAY_GESTURE);
 }
 
-function setDraftDragReplaySettings(nextSettings = {}) {
+function setDraftDragReplaySettings(nextSettings = {}, profileKey = getActiveDragReplayProfileKey()) {
   const current = getDraftDragReplaySettings();
-  const hasDefaultGesture = Object.prototype.hasOwnProperty.call(nextSettings, 'defaultGesture');
-  const defaultGesture = hasDefaultGesture
-    ? normalizeDragReplayGesture(nextSettings.defaultGesture) || current.defaultGesture
-    : current.defaultGesture;
-  const hasGesture = Object.prototype.hasOwnProperty.call(nextSettings, 'gesture');
-  const gesture = hasGesture ? normalizeDragReplayGesture(nextSettings.gesture) || defaultGesture : current.gesture || defaultGesture;
+  const profiles = deepClone(current.profiles || {});
+  const currentProfile = profiles[profileKey] || getDraftDragReplayProfile(profileKey);
+
+  if (nextSettings.profiles && typeof nextSettings.profiles === 'object') {
+    DRAG_REPLAY_PROFILE_KEYS.forEach((key) => {
+      profiles[key] = normalizeDragReplayProfile(nextSettings.profiles[key], current.profiles?.[key]?.defaultGesture);
+    });
+  } else if (DRAG_REPLAY_PROFILE_KEYS.includes(profileKey)) {
+    const hasDefaultGesture = Object.prototype.hasOwnProperty.call(nextSettings, 'defaultGesture');
+    const defaultGesture = hasDefaultGesture
+      ? normalizeDragReplayGesture(nextSettings.defaultGesture) || currentProfile.defaultGesture
+      : currentProfile.defaultGesture;
+    const hasGesture = Object.prototype.hasOwnProperty.call(nextSettings, 'gesture');
+    const gesture = hasGesture
+      ? normalizeDragReplayGesture(nextSettings.gesture) || defaultGesture
+      : currentProfile.gesture || defaultGesture;
+    profiles[profileKey] = {
+      gesture,
+      defaultGesture
+    };
+  }
+
   state.draftConfig.browser = {
     ...(state.draftConfig.browser || {}),
     dragReplay: {
       enabled: Object.prototype.hasOwnProperty.call(nextSettings, 'enabled') ? !!nextSettings.enabled : current.enabled,
-      gesture,
-      defaultGesture
+      profiles
     }
   };
 }
@@ -1699,35 +1978,38 @@ function formatDragReplayGesture(gesture) {
   return `시작 ${formatDragReplayPercent(normalized.startXRatio)}, ${formatDragReplayPercent(normalized.startYRatio)} -> 끝 ${formatDragReplayPercent(normalized.endXRatio)}, ${formatDragReplayPercent(normalized.endYRatio)} / ${normalized.durationMs}ms`;
 }
 
-function setDragReplayInputValues(gesture) {
+function setDragReplayInputValues(profileKey, gesture) {
   const normalized = normalizeDragReplayGesture(gesture);
+  const controls = getDragReplayControls(profileKey);
   const inputMap = [
-    [els.inputDragStartXPercent, normalized?.startXRatio],
-    [els.inputDragStartYPercent, normalized?.startYRatio],
-    [els.inputDragEndXPercent, normalized?.endXRatio],
-    [els.inputDragEndYPercent, normalized?.endYRatio]
+    [controls.inputDragStartXPercent, normalized?.startXRatio],
+    [controls.inputDragStartYPercent, normalized?.startYRatio],
+    [controls.inputDragEndXPercent, normalized?.endXRatio],
+    [controls.inputDragEndYPercent, normalized?.endYRatio]
   ];
+  const isRecordingThisProfile = state.dragRecordInProgress && state.dragRecordProfile === profileKey;
 
   inputMap.forEach(([input, value]) => {
     if (!input) {
       return;
     }
     input.value = normalized ? ratioToPercentInputValue(value) : '';
-    input.disabled = state.dragRecordInProgress || !normalized;
+    input.disabled = isRecordingThisProfile || !normalized;
   });
 
-  if (els.inputDragDurationMs) {
-    els.inputDragDurationMs.value = normalized ? String(normalized.durationMs) : '';
-    els.inputDragDurationMs.disabled = state.dragRecordInProgress || !normalized;
+  if (controls.inputDragDurationMs) {
+    controls.inputDragDurationMs.value = normalized ? String(normalized.durationMs) : '';
+    controls.inputDragDurationMs.disabled = isRecordingThisProfile || !normalized;
   }
 }
 
-function readDragReplayGestureFromInputs() {
-  const startXRatio = ratioFromPercentInput(els.inputDragStartXPercent);
-  const startYRatio = ratioFromPercentInput(els.inputDragStartYPercent);
-  const endXRatio = ratioFromPercentInput(els.inputDragEndXPercent);
-  const endYRatio = ratioFromPercentInput(els.inputDragEndYPercent);
-  const durationMs = Number.parseInt(els.inputDragDurationMs?.value, 10);
+function readDragReplayGestureFromInputs(profileKey) {
+  const controls = getDragReplayControls(profileKey);
+  const startXRatio = ratioFromPercentInput(controls.inputDragStartXPercent);
+  const startYRatio = ratioFromPercentInput(controls.inputDragStartYPercent);
+  const endXRatio = ratioFromPercentInput(controls.inputDragEndXPercent);
+  const endYRatio = ratioFromPercentInput(controls.inputDragEndYPercent);
+  const durationMs = Number.parseInt(controls.inputDragDurationMs?.value, 10);
   return normalizeDragReplayGesture({
     startXRatio,
     startYRatio,
@@ -1737,70 +2019,95 @@ function readDragReplayGestureFromInputs() {
   });
 }
 
-async function updateDragReplayGestureFromInputs() {
+async function updateDragReplayGestureFromInputs(profileKey) {
   if (state.dragRecordInProgress) {
     return;
   }
 
-  const gesture = readDragReplayGestureFromInputs();
+  const gesture = readDragReplayGestureFromInputs(profileKey);
   if (!gesture) {
-    renderDragReplayStatus('드래그 수치가 올바르지 않습니다. 저장된 값을 확인하세요.');
+    renderDragReplayStatus('드래그 위치가 올바르지 않습니다. 저장된 값을 확인하세요.', profileKey);
     return;
   }
 
-  setDraftDragReplaySettings({ gesture });
-  renderDragReplayStatus();
+  setDraftDragReplaySettings({ gesture }, profileKey);
+  renderDragReplayStatus('', profileKey);
   await syncDraftState();
 }
 
-function renderDragReplayStatus(message = '') {
+function getDragReplayProfileStatusText(profileKey, profile, message = '') {
+  if (message) {
+    return message;
+  }
+  if (state.dragRecordInProgress && state.dragRecordProfile === profileKey) {
+    return '드래그 녹화 중: 웹 화면에서 원하는 만큼 드래그하세요.';
+  }
+  if (profile?.gesture) {
+    return `드래그 보정 저장됨: ${formatDragReplayGesture(profile.gesture)}`;
+  }
+  return '드래그 보정: 기본값 사용 중';
+}
+
+function renderDragReplayStatus(message = '', messageProfileKey = getActiveDragReplayProfileKey()) {
   const settings = getDraftDragReplaySettings();
   if (els.checkDragReplayEnabled) {
     els.checkDragReplayEnabled.checked = settings.enabled;
   }
-  setDragReplayInputValues(settings.gesture);
-  if (els.btnStartDragRecord) {
-    els.btnStartDragRecord.disabled = state.dragRecordInProgress;
-  }
-  if (els.btnClearDragRecord) {
-    els.btnClearDragRecord.disabled = false;
-  }
-  if (els.btnSaveDragReplayDefault) {
-    els.btnSaveDragReplayDefault.disabled = state.dragRecordInProgress || !settings.gesture;
-  }
-  if (!els.dragReplayStatus) {
-    return;
-  }
+  const activeProfileKey = getActiveDragReplayProfileKey();
 
-  if (message) {
-    els.dragReplayStatus.textContent = message;
-    return;
-  }
-  if (state.dragRecordInProgress) {
-    els.dragReplayStatus.textContent = '드래그 녹화 중: 웹 화면에서 원하는 만큼 드래그하세요.';
-    return;
-  }
-  if (settings.gesture) {
-    els.dragReplayStatus.textContent = `드래그 보정 저장됨: ${formatDragReplayGesture(settings.gesture)}`;
-    return;
-  }
-  els.dragReplayStatus.textContent = '드래그 보정: 기본값 사용 중';
+  DRAG_REPLAY_PROFILE_KEYS.forEach((profileKey) => {
+    const profile = settings.profiles?.[profileKey] || getDraftDragReplayProfile(profileKey);
+    const controls = getDragReplayControls(profileKey);
+    const isActive = profileKey === activeProfileKey;
+    const isRecordingThisProfile = state.dragRecordInProgress && state.dragRecordProfile === profileKey;
+    setDragReplayInputValues(profileKey, profile.gesture);
+
+    controls.panel?.classList.toggle('active', isActive);
+    if (controls.btnStartDragRecord) {
+      controls.btnStartDragRecord.disabled = state.dragRecordInProgress || !isActive;
+      controls.btnStartDragRecord.title = isActive
+        ? ''
+        : '현재 화면 상태와 같은 보정값만 녹화할 수 있습니다.';
+    }
+    if (controls.btnClearDragRecord) {
+      controls.btnClearDragRecord.disabled = isRecordingThisProfile;
+    }
+    if (controls.btnSaveDragReplayDefault) {
+      controls.btnSaveDragReplayDefault.disabled = isRecordingThisProfile || !profile.gesture;
+    }
+    if (controls.defaultHelp) {
+      const defaultText = `${DRAG_REPLAY_PROFILE_LABELS[profileKey]} 기본값: ${formatDragReplayGesture(profile.defaultGesture)}`;
+      setHelpTooltipText(controls.defaultHelp, defaultText);
+    }
+    if (controls.dragReplayStatus) {
+      controls.dragReplayStatus.textContent = getDragReplayProfileStatusText(
+        profileKey,
+        profile,
+        profileKey === messageProfileKey ? message : ''
+      );
+    }
+  });
 }
 
-async function startDragReplayRecording() {
+async function startDragReplayRecording(profileKey = getActiveDragReplayProfileKey()) {
   if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
-    renderDragReplayStatus('드래그 녹화 실패: 웹 화면이 아직 준비되지 않았습니다.');
+    renderDragReplayStatus('드래그 녹화 실패: 웹 화면이 아직 준비되지 않았습니다.', profileKey);
     return;
   }
   if (state.dragRecordInProgress) {
+    return;
+  }
+  if (profileKey !== getActiveDragReplayProfileKey()) {
+    renderDragReplayStatus('현재 화면 상태와 같은 보정값만 녹화할 수 있습니다.', profileKey);
     return;
   }
 
   state.dragRecordInProgress = true;
+  state.dragRecordProfile = profileKey;
   state.dragRecordRequestId += 1;
   const requestId = state.dragRecordRequestId;
-  setDraftDragReplaySettings({ gesture: getDraftDragReplaySettings().gesture || getDraftDragReplayDefaultGesture() });
-  renderDragReplayStatus();
+  setDraftDragReplaySettings({ gesture: getDraftDragReplayProfile(profileKey).gesture || getDraftDragReplayDefaultGesture(profileKey) }, profileKey);
+  renderDragReplayStatus('', profileKey);
 
   const script = `
     (() => {
@@ -1893,23 +2200,26 @@ async function startDragReplayRecording() {
     if (result?.ok) {
       const gesture = normalizeDragReplayGesture(result.gesture);
       if (gesture) {
-        setDraftDragReplaySettings({ gesture });
+        setDraftDragReplaySettings({ gesture }, profileKey);
         state.dragRecordInProgress = false;
-        renderDragReplayStatus();
-        showStatusOverride('드래그 녹화 저장');
+        state.dragRecordProfile = null;
+        renderDragReplayStatus('', profileKey);
+        showStatusOverride(`${DRAG_REPLAY_PROFILE_LABELS[profileKey]} 드래그 녹화 저장`);
         await syncDraftState();
         return;
       }
     }
 
     state.dragRecordInProgress = false;
-    renderDragReplayStatus(result?.cancelled ? '드래그 녹화를 중단했습니다.' : '드래그 녹화 실패: 다시 시도하세요.');
+    state.dragRecordProfile = null;
+    renderDragReplayStatus(result?.cancelled ? '드래그 녹화를 중단했습니다.' : '드래그 녹화 실패: 다시 시도하세요.', profileKey);
   } catch (err) {
     if (requestId !== state.dragRecordRequestId) {
       return;
     }
     state.dragRecordInProgress = false;
-    renderDragReplayStatus('드래그 녹화 실패: 웹 화면에서 스크립트를 실행하지 못했습니다.');
+    state.dragRecordProfile = null;
+    renderDragReplayStatus('드래그 녹화 실패: 웹 화면에서 스크립트를 실행하지 못했습니다.', profileKey);
     console.warn('Drag replay recording failed:', err);
   }
 }
@@ -1920,8 +2230,10 @@ async function stopDragReplayRecording(message = '드래그 녹화를 중단했�
   }
 
   state.dragRecordRequestId += 1;
+  const profileKey = state.dragRecordProfile || getActiveDragReplayProfileKey();
   state.dragRecordInProgress = false;
-  renderDragReplayStatus(message);
+  state.dragRecordProfile = null;
+  renderDragReplayStatus(message, profileKey);
   try {
     await els.browserView?.executeJavaScript?.(`
       (() => {
@@ -2082,7 +2394,7 @@ async function dispatchSyntheticWebviewDrag(gesture) {
 }
 
 async function replaySmssDragIfEnabled() {
-  const settings = getDraftDragReplaySettings();
+  const settings = getActiveDraftDragReplaySettings();
   if (!settings.enabled || !settings.gesture || !els.browserView) {
     return false;
   }
@@ -2098,13 +2410,18 @@ async function replaySmssDragIfEnabled() {
   try {
     const sent = await sendWebviewDragInput(points);
     if (sent) {
+      clearSmssFocusArtifacts();
       return true;
     }
   } catch (err) {
     console.warn('Drag replay input event failed:', err);
   }
 
-  return dispatchSyntheticWebviewDrag(settings.gesture);
+  const syntheticSent = await dispatchSyntheticWebviewDrag(settings.gesture);
+  if (syntheticSent) {
+    clearSmssFocusArtifacts();
+  }
+  return syntheticSent;
 }
 
 async function activateLine4InBrowser() {
@@ -2321,11 +2638,12 @@ async function navigateBrowserForLine4(targetUrl, { reloadIfCurrent = true } = {
 }
 
 async function getDragReplayVerificationSnapshot() {
-  const settings = getDraftDragReplaySettings();
+  const settings = getActiveDraftDragReplaySettings();
   if (!settings.enabled || !settings.gesture || !els.browserView) {
     return {
       enabled: !!settings.enabled,
       hasGesture: !!settings.gesture,
+      profileKey: settings.profileKey,
       gesture: settings.gesture || null,
       viewport: null,
       points: null
@@ -2338,6 +2656,7 @@ async function getDragReplayVerificationSnapshot() {
   return {
     enabled: true,
     hasGesture: true,
+    profileKey: settings.profileKey,
     gesture: settings.gesture,
     viewport: viewport || (hostRect ? {
       width: Math.round(hostRect.width),
@@ -2398,6 +2717,7 @@ async function runLine4DisplaySequence(reason = 'manual') {
     const dragApplied = dragSnapshot.enabled && dragSnapshot.hasGesture
       ? await replaySmssDragIfEnabled()
       : true;
+    clearSmssFocusArtifacts();
 
     const completed = activated && inPageZoomApplied && dragApplied;
     state.autoLine4Triggered = completed;
@@ -2961,12 +3281,16 @@ function applySettingsToForm() {
   if (els.selectPopupMode) {
     els.selectPopupMode.value = popupMode === 'current' ? 'current' : 'allow';
   }
+  state.draftConfig.layout = normalizeLayoutSettings(state.draftConfig.layout);
+  els.selectSplitRatio.value = state.draftConfig.layout.splitRatio;
+  if (els.checkHideNoticeWhenEmpty) {
+    els.checkHideNoticeWhenEmpty.checked = !!state.draftConfig.layout.hideNoticeWhenEmpty;
+  }
   state.draftConfig.browser.autoRefresh = getDraftTrainInfoAutoRefreshSettings();
   renderTrainInfoAutoRefreshStatus();
   state.draftConfig.browser.dragReplay = getDraftDragReplaySettings();
   renderDragReplayStatus();
   updatePopupModeVisibility();
-  els.selectSplitRatio.value = state.draftConfig.layout.splitRatio;
   els.selectTransition.value = state.draftConfig.player.transition;
   els.checkAlwaysOnTop.checked = !!state.draftConfig.window.alwaysOnTop;
   els.checkPreventMin.checked = !!state.draftConfig.window.preventMinimize;
@@ -3143,14 +3467,24 @@ function updateStationRequirementUi(message = '') {
   const savedSelected = isRequiredStationSaved();
   const draftSelected = isRequiredStationDraftSelected();
   const required = !savedSelected || !draftSelected;
+  const savePromptRequired = !savedSelected && draftSelected;
   state.stationRequirementActive = required;
   document.body.classList.toggle('station-required-active', required);
   els.sidebarPanel.classList.toggle('station-required-mode', required);
+  els.sidebarPanel.classList.toggle('station-save-required', savePromptRequired);
   els.trainStationField?.classList.toggle('station-required-field', required && !draftSelected);
   if (els.selectTrainStation) {
     els.selectTrainStation.required = true;
     els.selectTrainStation.setAttribute('aria-required', 'true');
     els.selectTrainStation.setAttribute('aria-invalid', required && !draftSelected ? 'true' : 'false');
+  }
+  if (els.btnSaveSidebarSettings) {
+    els.btnSaveSidebarSettings.classList.toggle('station-save-prompt', savePromptRequired);
+    if (savePromptRequired) {
+      els.btnSaveSidebarSettings.setAttribute('aria-describedby', 'stationRequiredMessage');
+    } else {
+      els.btnSaveSidebarSettings.removeAttribute('aria-describedby');
+    }
   }
 
   if (required) {
@@ -3378,6 +3712,7 @@ function renderPlaylist() {
       }
       target.publishStartDate = normalizePublishDate(publishStartInput.value);
       target.publishEndDate = normalizePublishDate(publishEndInput.value);
+      applyLayout();
       renderPlaylist();
       showSlide(state.currentIndex, { force: true });
       syncDraftState();
@@ -3390,6 +3725,7 @@ function renderPlaylist() {
       if (state.currentIndex >= state.draftConfig.player.playlist.length) {
         state.currentIndex = 0;
       }
+      applyLayout();
       renderPlaylist();
       showSlide(state.currentIndex);
       syncDraftState();
@@ -3472,21 +3808,15 @@ function applyDraftConfigToUI({ firstSlide = false } = {}) {
 
 function createDefaultConfigForReset() {
   const nextConfig = deepClone(defaultConfig);
-  const dragDefault = getDraftDragReplayDefaultGesture();
   nextConfig.browser = {
     ...nextConfig.browser,
-    dragReplay: normalizeDragReplaySettings({
-      ...(nextConfig.browser?.dragReplay || {}),
-      gesture: dragDefault,
-      defaultGesture: dragDefault
-    })
+    dragReplay: normalizeDragReplaySettings(nextConfig.browser?.dragReplay, nextConfig.layout?.splitRatio)
   };
   return nextConfig;
 }
 
 function resetGeneralSettingsToDefaults() {
   const defaults = createDefaultConfigForReset();
-  state.draftConfig.layout = deepClone(defaults.layout);
   state.draftConfig.window = normalizeWindowSettings(defaults.window);
   state.draftConfig.ui = normalizeUiSettings(defaults.ui);
   state.draftConfig.maintenance = normalizeMaintenanceSettings(defaults.maintenance);
@@ -3494,9 +3824,10 @@ function resetGeneralSettingsToDefaults() {
 
 function resetTrainInfoSettingsToDefaults() {
   const defaults = createDefaultConfigForReset();
+  state.draftConfig.layout = normalizeLayoutSettings(defaults.layout);
   state.draftConfig.browser = {
     ...deepClone(defaults.browser),
-    dragReplay: normalizeDragReplaySettings(defaults.browser.dragReplay),
+    dragReplay: normalizeDragReplaySettings(defaults.browser.dragReplay, defaults.layout?.splitRatio),
     autoRefresh: normalizeTrainInfoAutoRefreshSettings(defaults.browser.autoRefresh)
   };
 }
@@ -3519,19 +3850,17 @@ function mergeUIState(oldConfig, newConfig) {
     };
   });
   const browserConfig = newConfig.browser || {};
+  const layoutConfig = normalizeLayoutSettings(newConfig.layout);
   return {
     ...deepClone(newConfig),
     browser: {
       url: normalizeUrl(browserConfig.url || defaultConfig.browser.url),
       popupMode: ['block', 'allow', 'current'].includes(browserConfig.popupMode) ? browserConfig.popupMode : defaultConfig.browser.popupMode,
       zoomPercent: normalizeZoomPercent(browserConfig.zoomPercent),
-      dragReplay: normalizeDragReplaySettings(browserConfig.dragReplay),
+      dragReplay: normalizeDragReplaySettings(browserConfig.dragReplay, layoutConfig.splitRatio),
       autoRefresh: normalizeTrainInfoAutoRefreshSettings(browserConfig.autoRefresh)
     },
-    layout: {
-      splitRatio: newConfig.layout?.splitRatio || defaultConfig.layout.splitRatio,
-      borderEnabled: false
-    },
+    layout: layoutConfig,
     window: normalizeWindowSettings(newConfig.window),
     ui: normalizeUiSettings(newConfig.ui),
     maintenance: normalizeMaintenanceSettings(newConfig.maintenance),
@@ -3566,8 +3895,13 @@ function bindSettingsForm() {
       intervalHours: els.inputTrainAutoRefreshHours?.value
     });
     setDraftDragReplaySettings({ enabled: !!els.checkDragReplayEnabled?.checked });
-    state.draftConfig.layout.splitRatio = els.selectSplitRatio.value;
-    state.draftConfig.layout.borderEnabled = false;
+    state.draftConfig.layout = normalizeLayoutSettings({
+      ...(state.draftConfig.layout || {}),
+      splitRatio: els.selectSplitRatio.value,
+      hideNoticeWhenEmpty: els.checkHideNoticeWhenEmpty
+        ? els.checkHideNoticeWhenEmpty.checked
+        : state.draftConfig.layout?.hideNoticeWhenEmpty
+    });
     state.draftConfig.player.transition = normalizeTransition(els.selectTransition.value);
     state.draftConfig.ui = normalizeUiSettings({
       ...(state.draftConfig.ui || {}),
@@ -3626,6 +3960,7 @@ function bindSettingsForm() {
     els.checkDragReplayEnabled,
     els.checkAdminOptions,
     els.selectSplitRatio,
+    els.checkHideNoticeWhenEmpty,
     els.selectTransition,
     els.checkAlwaysOnTop,
     els.checkPreventMin,
@@ -3643,44 +3978,47 @@ function bindSettingsForm() {
     input.addEventListener('blur', update);
   });
 
-  els.btnStartDragRecord?.addEventListener('click', () => {
-    startDragReplayRecording();
-  });
+  DRAG_REPLAY_PROFILE_KEYS.forEach((profileKey) => {
+    const controls = getDragReplayControls(profileKey);
+    controls.btnStartDragRecord?.addEventListener('click', () => {
+      startDragReplayRecording(profileKey);
+    });
 
-  els.btnClearDragRecord?.addEventListener('click', async () => {
-    if (state.dragRecordInProgress) {
-      await stopDragReplayRecording('드래그 녹화를 중단하고 기본값으로 되돌렸습니다.');
-    }
-    setDraftDragReplaySettings({ gesture: getDraftDragReplayDefaultGesture() });
-    renderDragReplayStatus('드래그 녹화를 삭제하고 기본값으로 되돌렸습니다.');
-    await syncDraftState();
-  });
+    controls.btnClearDragRecord?.addEventListener('click', async () => {
+      if (state.dragRecordInProgress && state.dragRecordProfile === profileKey) {
+        await stopDragReplayRecording('드래그 녹화를 중단하고 기본값으로 되돌렸습니다.');
+      }
+      setDraftDragReplaySettings({ gesture: getDraftDragReplayDefaultGesture(profileKey) }, profileKey);
+      renderDragReplayStatus('드래그 보정을 기본값으로 되돌렸습니다.', profileKey);
+      await syncDraftState();
+    });
 
-  els.btnSaveDragReplayDefault?.addEventListener('click', async () => {
-    const gesture = readDragReplayGestureFromInputs() || getDraftDragReplaySettings().gesture;
-    if (!gesture) {
-      renderDragReplayStatus('저장할 드래그 보정값이 없습니다.');
-      return;
-    }
-    setDraftDragReplaySettings({ gesture, defaultGesture: gesture });
-    renderDragReplayStatus('드래그 보정 기본값이 저장되었습니다.');
-    showStatusOverride('드래그 보정 기본값이 저장되었습니다.');
-    await saveSettingsToDisk();
-    await syncDraftState();
-  });
+    controls.btnSaveDragReplayDefault?.addEventListener('click', async () => {
+      const gesture = readDragReplayGestureFromInputs(profileKey) || getDraftDragReplayProfile(profileKey).gesture;
+      if (!gesture) {
+        renderDragReplayStatus('저장할 드래그 보정값이 없습니다.', profileKey);
+        return;
+      }
+      setDraftDragReplaySettings({ gesture, defaultGesture: gesture }, profileKey);
+      renderDragReplayStatus('드래그 보정 기본값이 저장되었습니다.', profileKey);
+      showStatusOverride(`${DRAG_REPLAY_PROFILE_LABELS[profileKey]} 드래그 보정 기본값이 저장되었습니다.`);
+      await saveSettingsToDisk();
+      await syncDraftState();
+    });
 
-  [
-    els.inputDragStartXPercent,
-    els.inputDragStartYPercent,
-    els.inputDragEndXPercent,
-    els.inputDragEndYPercent,
-    els.inputDragDurationMs
-  ].forEach((input) => {
-    if (!input) {
-      return;
-    }
-    input.addEventListener('change', updateDragReplayGestureFromInputs);
-    input.addEventListener('blur', updateDragReplayGestureFromInputs);
+    [
+      controls.inputDragStartXPercent,
+      controls.inputDragStartYPercent,
+      controls.inputDragEndXPercent,
+      controls.inputDragEndYPercent,
+      controls.inputDragDurationMs
+    ].forEach((input) => {
+      if (!input) {
+        return;
+      }
+      input.addEventListener('change', () => updateDragReplayGestureFromInputs(profileKey));
+      input.addEventListener('blur', () => updateDragReplayGestureFromInputs(profileKey));
+    });
   });
 }
 
@@ -3937,19 +4275,12 @@ function bindToolbarAndPanels() {
       return;
     }
 
-    selected.forEach((filePath) => {
-      const ext = filePath.split('.').pop().toLowerCase();
-      const isVideo = ['mp4', 'webm'].includes(ext);
-      const item = {
-        path: filePath,
-        type: isVideo ? 'video' : 'image',
-        duration: isVideo ? 30 : 5,
-        publishStartDate: '',
-        publishEndDate: '',
-        missing: false
-      };
-      state.draftConfig.player.playlist.push(item);
-    });
+    selected
+      .map(createPlaylistItemFromPickedMedia)
+      .filter(Boolean)
+      .forEach((item) => {
+        state.draftConfig.player.playlist.push(item);
+      });
 
     renderPlaylist();
     await refreshMissingFlags();
@@ -3964,6 +4295,9 @@ function bindDividerDrag() {
   let dragging = false;
 
   els.divider.addEventListener('mousedown', () => {
+    if (state.noticePanelHidden) {
+      return;
+    }
     dragging = true;
     document.body.classList.add('is-dragging');
   });
@@ -3987,6 +4321,9 @@ function bindDividerDrag() {
     }
     dragging = false;
     document.body.classList.remove('is-dragging');
+    if (state.noticePanelHidden) {
+      return;
+    }
 
     const rect = els.splitRoot.getBoundingClientRect();
     const cols = getComputedStyle(els.splitRoot).gridTemplateColumns.split(' ');
@@ -4144,18 +4481,21 @@ function bindWebviewPopupHandling() {
     syncWebviewPopupPermission();
     applyBrowserZoom();
     suppressInPagePopups();
+    clearSmssFocusArtifacts();
     scheduleAutoActivateLine4(900);
   });
 
   els.browserView.addEventListener('did-finish-load', () => {
     logSmssLayoutState('webview-did-finish-load');
     suppressInPagePopups();
+    clearSmssFocusArtifacts();
     scheduleAutoActivateLine4(900);
   });
 
   els.browserView.addEventListener('did-stop-loading', () => {
     logSmssLayoutState('webview-did-stop-loading');
     suppressInPagePopups();
+    clearSmssFocusArtifacts();
     scheduleAutoActivateLine4(900);
   });
 

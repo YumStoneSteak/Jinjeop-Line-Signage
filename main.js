@@ -49,6 +49,9 @@ const AUTO_START_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\
 const APP_ID = 'kr.or.ncuc.jinjeop-line-signage';
 const DISPLAY_APP_NAME = '진접선 행선안내 사이니지';
 const APP_ICON_RELATIVE_PATH = path.join('files', 'icons', 'ncuc.ico');
+const NOTICE_MEDIA_DIR_NAME = 'notice-media';
+const NOTICE_MEDIA_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
+const NOTICE_MEDIA_VIDEO_EXTENSIONS = new Set(['mp4', 'webm']);
 const KOREAN_APP_NAME = '진접선 행선안내 사이니지';
 const AUTO_START_VALUE_NAME = 'JinjeopLineSignage';
 const LEGACY_AUTO_START_VALUE_NAMES = ['NamyangjuDashboard'];
@@ -211,6 +214,11 @@ function hasMissingMaintenanceConfig(config) {
   const maintenanceConfig = config?.maintenance || {};
   return ['autoUpdateEnabled', 'updateTime', 'unavailableStartTime', 'unavailableEndTime']
     .some((key) => !hasOwn(maintenanceConfig, key));
+}
+
+function hasMissingLayoutConfig(config) {
+  const layoutConfig = config?.layout || {};
+  return !hasOwn(layoutConfig, 'hideNoticeWhenEmpty');
 }
 
 const timetableStations = {
@@ -723,6 +731,175 @@ function getConfigPath() {
   return path.join(app.getPath('userData'), 'config.json');
 }
 
+function getNoticeMediaDir() {
+  return path.join(app.getPath('userData'), NOTICE_MEDIA_DIR_NAME);
+}
+
+function getNoticeMediaExtension(filePath) {
+  return path.extname(String(filePath || '')).replace(/^\./, '').toLowerCase();
+}
+
+function isNoticeMediaExtension(filePath) {
+  const ext = getNoticeMediaExtension(filePath);
+  return NOTICE_MEDIA_IMAGE_EXTENSIONS.has(ext) || NOTICE_MEDIA_VIDEO_EXTENSIONS.has(ext);
+}
+
+function getNoticeMediaType(filePath) {
+  return NOTICE_MEDIA_VIDEO_EXTENSIONS.has(getNoticeMediaExtension(filePath)) ? 'video' : 'image';
+}
+
+function isPathInside(parentPath, candidatePath) {
+  try {
+    const parent = path.resolve(parentPath).toLowerCase();
+    const candidate = path.resolve(candidatePath).toLowerCase();
+    return candidate === parent || candidate.startsWith(`${parent}${path.sep}`);
+  } catch (_) {
+    return false;
+  }
+}
+
+function sanitizeNoticeMediaFilename(filePath) {
+  const parsed = path.parse(String(filePath || ''));
+  const safeName = (parsed.name || 'notice')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100) || 'notice';
+  const ext = getNoticeMediaExtension(filePath);
+  return `${safeName}${ext ? `.${ext}` : ''}`;
+}
+
+function getUniqueNoticeMediaPath(sourcePath) {
+  const noticeDir = getNoticeMediaDir();
+  const safeFilename = sanitizeNoticeMediaFilename(sourcePath);
+  const parsed = path.parse(safeFilename);
+  let candidate = path.join(noticeDir, safeFilename);
+  let suffix = 2;
+
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(noticeDir, `${parsed.name}-${suffix}${parsed.ext}`);
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
+function importNoticeMediaFile(sourcePath) {
+  const normalizedSource = typeof sourcePath === 'string' ? sourcePath.trim() : '';
+  if (!normalizedSource || !isNoticeMediaExtension(normalizedSource)) {
+    return null;
+  }
+
+  const noticeDir = getNoticeMediaDir();
+  try {
+    if (!fs.existsSync(normalizedSource) || !fs.statSync(normalizedSource).isFile()) {
+      return {
+        sourcePath: normalizedSource,
+        path: normalizedSource,
+        type: getNoticeMediaType(normalizedSource),
+        copied: false,
+        exists: false
+      };
+    }
+
+    fs.mkdirSync(noticeDir, { recursive: true });
+    if (isPathInside(noticeDir, normalizedSource)) {
+      return {
+        sourcePath: normalizedSource,
+        path: normalizedSource,
+        type: getNoticeMediaType(normalizedSource),
+        copied: false,
+        exists: true
+      };
+    }
+
+    const targetPath = getUniqueNoticeMediaPath(normalizedSource);
+    fs.copyFileSync(normalizedSource, targetPath);
+    return {
+      sourcePath: normalizedSource,
+      path: targetPath,
+      type: getNoticeMediaType(targetPath),
+      copied: true,
+      exists: true
+    };
+  } catch (err) {
+    safeConsoleError('Failed to preserve notice media file:', err);
+    return {
+      sourcePath: normalizedSource,
+      path: normalizedSource,
+      type: getNoticeMediaType(normalizedSource),
+      copied: false,
+      exists: fs.existsSync(normalizedSource),
+      error: err.message || String(err)
+    };
+  }
+}
+
+function importNoticeMediaFiles(filePaths) {
+  return (Array.isArray(filePaths) ? filePaths : [])
+    .map(importNoticeMediaFile)
+    .filter(Boolean);
+}
+
+function findPreservedNoticeMediaPath(filePath) {
+  const originalPath = typeof filePath === 'string' ? filePath : '';
+  if (!originalPath || fs.existsSync(originalPath)) {
+    return originalPath;
+  }
+
+  const noticeDir = getNoticeMediaDir();
+  const basename = path.basename(originalPath);
+  const candidate = basename ? path.join(noticeDir, basename) : '';
+  if (candidate && fs.existsSync(candidate)) {
+    return candidate;
+  }
+  return originalPath;
+}
+
+function migrateNoticePlaylistMedia(playlist) {
+  let changed = false;
+  const migrated = normalizePlaylist(playlist).map((item) => {
+    let nextItem = { ...item };
+    const repairedPath = findPreservedNoticeMediaPath(nextItem.path);
+    if (repairedPath && repairedPath !== nextItem.path) {
+      nextItem = {
+        ...nextItem,
+        path: repairedPath,
+        type: getNoticeMediaType(repairedPath)
+      };
+      changed = true;
+    }
+
+    const imported = importNoticeMediaFile(nextItem.path);
+    if (imported?.exists && imported.path && imported.path !== nextItem.path) {
+      nextItem = {
+        ...nextItem,
+        path: imported.path,
+        type: imported.type
+      };
+      changed = true;
+    }
+    return nextItem;
+  });
+
+  return { playlist: migrated, changed };
+}
+
+function preserveNoticeMediaInConfig(config) {
+  const source = config && typeof config === 'object' ? config : defaultConfig;
+  const migration = migrateNoticePlaylistMedia(source.player?.playlist);
+  return {
+    config: {
+      ...source,
+      player: {
+        ...(source.player || {}),
+        playlist: migration.playlist
+      }
+    },
+    changed: migration.changed
+  };
+}
+
 function getAppIconPath() {
   const staticIconPaths = [
     path.join(__dirname, APP_ICON_RELATIVE_PATH),
@@ -967,6 +1144,43 @@ function normalizeZoomPercent(value) {
   return normalizeBrowserZoomPercent(value);
 }
 
+function normalizeSplitRatio(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const match = text.match(/^(\d+):(\d+)$/);
+  if (!match) {
+    return defaultConfig.layout.splitRatio;
+  }
+
+  const left = Number.parseInt(match[1], 10);
+  const right = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) {
+    return defaultConfig.layout.splitRatio;
+  }
+  return `${left}:${right}`;
+}
+
+function getBrowserWidthRatioFromSplitRatio(splitRatio) {
+  const normalized = normalizeSplitRatio(splitRatio);
+  const [leftText, rightText] = normalized.split(':');
+  const left = Number.parseInt(leftText, 10);
+  const right = Number.parseInt(rightText, 10);
+  const total = left + right;
+  return total > 0 ? left / total : 0.7;
+}
+
+function normalizeLayoutConfig(input) {
+  const source = input && typeof input === 'object' ? input : {};
+  return {
+    ...defaultConfig.layout,
+    ...source,
+    splitRatio: normalizeSplitRatio(source.splitRatio || defaultConfig.layout.splitRatio),
+    borderEnabled: false,
+    hideNoticeWhenEmpty: hasOwn(source, 'hideNoticeWhenEmpty')
+      ? !!source.hideNoticeWhenEmpty
+      : !!defaultConfig.layout.hideNoticeWhenEmpty
+  };
+}
+
 function clampRatio(value) {
   if (value === null || value === undefined || value === '') {
     return null;
@@ -1001,19 +1215,72 @@ function normalizeDragReplayGesture(input) {
   };
 }
 
-function normalizeDragReplaySettings(input) {
-  const defaults = defaultConfig.browser?.dragReplay || { enabled: true, gesture: null };
-  const source = input && typeof input === 'object' ? input : defaults;
-  const defaultGesture = normalizeDragReplayGesture(source.defaultGesture)
-    || normalizeDragReplayGesture(defaults.defaultGesture)
-    || normalizeDragReplayGesture(defaults.gesture);
+function scaleDragReplayGestureForHiddenNotice(gesture, splitRatio = defaultConfig.layout.splitRatio) {
+  const normalized = normalizeDragReplayGesture(gesture);
+  if (!normalized) {
+    return null;
+  }
+  const browserWidthRatio = getBrowserWidthRatioFromSplitRatio(splitRatio);
+  return normalizeDragReplayGesture({
+    ...normalized,
+    startXRatio: normalized.startXRatio * browserWidthRatio,
+    endXRatio: normalized.endXRatio * browserWidthRatio
+  });
+}
+
+function normalizeDragReplayProfile(input, fallbackGesture) {
+  const source = input && typeof input === 'object' ? input : {};
+  const fallback = normalizeDragReplayGesture(fallbackGesture);
+  const defaultGesture = normalizeDragReplayGesture(source.defaultGesture) || fallback;
   const gesture = hasOwn(source, 'gesture')
     ? normalizeDragReplayGesture(source.gesture) || defaultGesture
     : defaultGesture;
   return {
-    enabled: !!source.enabled,
     gesture,
     defaultGesture
+  };
+}
+
+function normalizeDragReplaySettings(input, splitRatio = defaultConfig.layout.splitRatio) {
+  const defaults = defaultConfig.browser?.dragReplay || { enabled: true, profiles: {} };
+  const source = input && typeof input === 'object' ? input : defaults;
+
+  const defaultVisibleGesture = normalizeDragReplayGesture(defaults.profiles?.noticeVisible?.defaultGesture)
+    || normalizeDragReplayGesture(defaults.profiles?.noticeVisible?.gesture);
+  const defaultHiddenGesture = normalizeDragReplayGesture(defaults.profiles?.noticeHidden?.defaultGesture)
+    || normalizeDragReplayGesture(defaults.profiles?.noticeHidden?.gesture)
+    || scaleDragReplayGestureForHiddenNotice(defaultVisibleGesture, splitRatio);
+
+  let noticeVisible;
+  let noticeHidden;
+  if (source.profiles && typeof source.profiles === 'object') {
+    noticeVisible = normalizeDragReplayProfile(source.profiles.noticeVisible, defaultVisibleGesture);
+    const hiddenFallback = scaleDragReplayGestureForHiddenNotice(noticeVisible.gesture, splitRatio)
+      || defaultHiddenGesture;
+    noticeHidden = normalizeDragReplayProfile(source.profiles.noticeHidden, hiddenFallback);
+  } else {
+    const legacyDefaultGesture = normalizeDragReplayGesture(source.defaultGesture)
+      || normalizeDragReplayGesture(source.gesture)
+      || defaultVisibleGesture;
+    const legacyGesture = hasOwn(source, 'gesture')
+      ? normalizeDragReplayGesture(source.gesture) || legacyDefaultGesture
+      : legacyDefaultGesture;
+    noticeVisible = {
+      gesture: legacyGesture,
+      defaultGesture: legacyDefaultGesture
+    };
+    noticeHidden = {
+      gesture: scaleDragReplayGestureForHiddenNotice(legacyGesture, splitRatio) || defaultHiddenGesture,
+      defaultGesture: scaleDragReplayGestureForHiddenNotice(legacyDefaultGesture, splitRatio) || defaultHiddenGesture
+    };
+  }
+
+  return {
+    enabled: hasOwn(source, 'enabled') ? !!source.enabled : !!defaults.enabled,
+    profiles: {
+      noticeVisible,
+      noticeHidden
+    }
   };
 }
 
@@ -1281,15 +1548,16 @@ function parseSolarTermJson(text, yearInput) {
 
 function mergeConfig(userConfig) {
   const browserConfig = userConfig.browser || {};
+  const layoutConfig = normalizeLayoutConfig(userConfig.layout);
   return {
     ...defaultConfig,
     ...userConfig,
-    layout: { ...defaultConfig.layout, ...(userConfig.layout || {}), borderEnabled: false },
+    layout: layoutConfig,
     browser: {
       url: normalizeUrl(browserConfig.url || defaultConfig.browser.url),
       popupMode: ['block', 'allow', 'current'].includes(browserConfig.popupMode) ? browserConfig.popupMode : defaultConfig.browser.popupMode,
       zoomPercent: normalizeZoomPercent(browserConfig.zoomPercent),
-      dragReplay: normalizeDragReplaySettings(browserConfig.dragReplay),
+      dragReplay: normalizeDragReplaySettings(browserConfig.dragReplay, layoutConfig.splitRatio),
       autoRefresh: normalizeTrainInfoAutoRefreshSettings(browserConfig.autoRefresh)
     },
     player: {
@@ -1660,13 +1928,16 @@ function loadConfig() {
 
     const raw = fs.readFileSync(configPath, 'utf-8');
     const parsed = JSON.parse(raw);
-    persistedConfig = mergeConfig(parsed);
+    const preservedConfig = preserveNoticeMediaInConfig(mergeConfig(parsed));
+    persistedConfig = preservedConfig.config;
     draftConfig = deepClone(persistedConfig);
     if (
       hasUnknownPlayerConfig(parsed)
+      || hasMissingLayoutConfig(parsed)
       || hasMissingStartupWindowConfig(parsed)
       || hasMissingUiConfig(parsed)
       || hasMissingMaintenanceConfig(parsed)
+      || preservedConfig.changed
     ) {
       fs.writeFileSync(configPath, JSON.stringify(persistedConfig, null, 2), 'utf-8');
     }
@@ -1679,7 +1950,7 @@ function loadConfig() {
 
 function writeConfig(config) {
   const configPath = getConfigPath();
-  const merged = mergeConfig(config || {});
+  const merged = preserveNoticeMediaInConfig(mergeConfig(config || {})).config;
   fs.writeFileSync(configPath, JSON.stringify(merged, null, 2), 'utf-8');
   persistedConfig = deepClone(merged);
   draftConfig = deepClone(merged);
@@ -2673,7 +2944,7 @@ ipcMain.handle('dialog:pickMediaFiles', async () => {
   if (result.canceled) {
     return [];
   }
-  return result.filePaths || [];
+  return importNoticeMediaFiles(result.filePaths || []);
 });
 
 ipcMain.handle('dialog:pickImageFile', async () => {
@@ -2702,7 +2973,14 @@ ipcMain.handle('media:validatePaths', (_, paths) => {
   if (!Array.isArray(paths)) {
     return [];
   }
-  return paths.map((p) => ({ path: p, exists: fs.existsSync(p) }));
+  return paths.map((p) => {
+    const resolvedPath = findPreservedNoticeMediaPath(p);
+    return {
+      path: p,
+      resolvedPath,
+      exists: !!resolvedPath && fs.existsSync(resolvedPath)
+    };
+  });
 });
 
 ipcMain.handle('browser:openPopup', (_, url) => {

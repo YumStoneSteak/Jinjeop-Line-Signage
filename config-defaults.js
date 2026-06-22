@@ -15,6 +15,11 @@
     endYRatio: 1,
     durationMs: 120
   };
+  const DEFAULT_HIDDEN_NOTICE_DRAG_REPLAY_GESTURE = {
+    ...DEFAULT_DRAG_REPLAY_GESTURE,
+    startXRatio: 0.56,
+    endXRatio: 0.126
+  };
 
   const defaultSidebarWidgets = [
     { id: 'logo', label: '로고', visible: true },
@@ -49,7 +54,8 @@
     return {
       layout: {
         splitRatio: '7:3',
-        borderEnabled: false
+        borderEnabled: false,
+        hideNoticeWhenEmpty: true
       },
       browser: {
         url: 'https://smss.seoulmetro.co.kr/traininfo/traininfoUserView.do',
@@ -57,8 +63,16 @@
         zoomPercent: DEFAULT_BROWSER_ZOOM_PERCENT,
         dragReplay: {
           enabled: true,
-          gesture: clone(DEFAULT_DRAG_REPLAY_GESTURE),
-          defaultGesture: clone(DEFAULT_DRAG_REPLAY_GESTURE)
+          profiles: {
+            noticeVisible: {
+              gesture: clone(DEFAULT_DRAG_REPLAY_GESTURE),
+              defaultGesture: clone(DEFAULT_DRAG_REPLAY_GESTURE)
+            },
+            noticeHidden: {
+              gesture: clone(DEFAULT_HIDDEN_NOTICE_DRAG_REPLAY_GESTURE),
+              defaultGesture: clone(DEFAULT_HIDDEN_NOTICE_DRAG_REPLAY_GESTURE)
+            }
+          }
         },
         autoRefresh: {
           enabled: true,
@@ -110,6 +124,7 @@
     DEFAULT_BROWSER_ZOOM_PERCENT,
     normalizeBrowserZoomPercent,
     DEFAULT_DRAG_REPLAY_GESTURE: clone(DEFAULT_DRAG_REPLAY_GESTURE),
+    DEFAULT_HIDDEN_NOTICE_DRAG_REPLAY_GESTURE: clone(DEFAULT_HIDDEN_NOTICE_DRAG_REPLAY_GESTURE),
     SIDEBAR_WIDGET_DEFAULTS_VERSION,
     defaultSidebarWidgets: clone(defaultSidebarWidgets),
     createDefaultConfig
