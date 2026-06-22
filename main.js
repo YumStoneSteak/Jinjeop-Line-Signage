@@ -31,6 +31,7 @@ let pendingAutoStartWarning = null;
 let lastPopupRequest = { url: '', mode: '', at: 0 };
 let allowProgrammaticMinimize = false;
 let lastSmssSuccessAt = null;
+let lastSmssPostSuccess = null;
 let smssWebRequestWatchdogInstalled = false;
 let smssWatchdogTimer = null;
 let smssLogFilePath = null;
@@ -43,6 +44,7 @@ let updateState = null;
 
 const SMSS_HOST = 'smss.seoulmetro.co.kr';
 const SMSS_WEBREQUEST_FILTER = { urls: [`*://${SMSS_HOST}/*`] };
+const SMSS_TRAININFO_POST_PATH = '/traininfo/traininfoUserMap.do';
 const AUTO_START_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const APP_ID = 'kr.or.ncuc.jinjeop-line-signage';
 const DISPLAY_APP_NAME = '진접선 행선안내 사이니지';
@@ -53,8 +55,19 @@ const LEGACY_AUTO_START_VALUE_NAMES = ['NamyangjuDashboard'];
 const smssDiagnosticContents = new Set();
 const smssConsoleForwardContents = new Set();
 const smokeTestMode = process.argv.includes('--smoke-test');
+const smokeTestDurationMs = smokeTestMode ? getSmokeTestDurationMs() : 1200;
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
+
+function getSmokeTestDurationMs() {
+  const durationArg = process.argv.find((arg) => String(arg || '').startsWith('--smoke-test-duration-ms='));
+  const rawDuration = durationArg ? durationArg.split('=').slice(1).join('=') : '';
+  const durationMs = Number.parseInt(rawDuration, 10);
+  if (!Number.isFinite(durationMs)) {
+    return 1200;
+  }
+  return Math.min(120000, Math.max(1200, durationMs));
+}
 
 function isOutputPipeError(err) {
   return !!err && (err.code === 'EPIPE' || err.errno === 'EPIPE');
@@ -291,6 +304,52 @@ function isSmssUrl(rawUrl) {
   } catch (_) {
     return false;
   }
+}
+
+function isSmssTrainInfoPost(details) {
+  if (!details || String(details.method || '').toUpperCase() !== 'POST') {
+    return false;
+  }
+
+  try {
+    const url = new URL(details.url);
+    return url.hostname === SMSS_HOST && url.pathname === SMSS_TRAININFO_POST_PATH;
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildSmssPostSuccessStatus(details, receivedAt = new Date()) {
+  const lastSuccessAt = receivedAt.toISOString();
+  return {
+    ok: true,
+    lastSuccessAt,
+    requestId: details.id,
+    method: details.method,
+    resourceType: details.resourceType,
+    statusCode: details.statusCode,
+    url: details.url
+  };
+}
+
+function getSmssPostStatus() {
+  return lastSmssPostSuccess
+    ? { ...lastSmssPostSuccess }
+    : {
+        ok: false,
+        lastSuccessAt: null,
+        method: 'POST',
+        statusCode: null,
+        url: `https://${SMSS_HOST}${SMSS_TRAININFO_POST_PATH}`
+      };
+}
+
+function notifySmssPostSuccess() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.webContents.send('smss:postSuccess', getSmssPostStatus());
 }
 
 function safeIsDestroyed(contents) {
@@ -599,14 +658,19 @@ function installSmssWebRequestWatchdog() {
       requestId: details.id,
       method: details.method,
       resourceType: details.resourceType,
+      isTrainInfoPost: isSmssTrainInfoPost(details),
       url: details.url
     });
     callback({ cancel: false });
   });
 
   session.defaultSession.webRequest.onCompleted(SMSS_WEBREQUEST_FILTER, (details) => {
-    if (details.statusCode >= 200 && details.statusCode <= 399) {
+    const isTrainInfoPost = isSmssTrainInfoPost(details);
+    const isSuccess = details.statusCode >= 200 && details.statusCode <= 399;
+    if (isTrainInfoPost && isSuccess) {
       lastSmssSuccessAt = Date.now();
+      lastSmssPostSuccess = buildSmssPostSuccessStatus(details, new Date(lastSmssSuccessAt));
+      notifySmssPostSuccess();
     }
 
     logSmss('[SMSS WEBREQUEST]', {
@@ -615,6 +679,8 @@ function installSmssWebRequestWatchdog() {
       method: details.method,
       resourceType: details.resourceType,
       statusCode: details.statusCode,
+      isTrainInfoPost,
+      isSuccess,
       url: details.url
     });
   });
@@ -625,6 +691,7 @@ function installSmssWebRequestWatchdog() {
       requestId: details.id,
       method: details.method,
       resourceType: details.resourceType,
+      isTrainInfoPost: isSmssTrainInfoPost(details),
       error: details.error,
       url: details.url
     });
@@ -2294,7 +2361,7 @@ function createMainWindow() {
       setTimeout(() => {
         bypassClosePrompt = true;
         app.quit();
-      }, 1200);
+      }, smokeTestDurationMs);
     }
   });
 
@@ -2466,6 +2533,8 @@ ipcMain.handle('updater:getStatus', () => getUpdateStatus());
 ipcMain.handle('updater:checkNow', () => checkForUpdates({ source: 'manual', installWhenDownloaded: false }));
 
 ipcMain.handle('updater:installNow', () => installDownloadedUpdate({ silent: true, forceRunAfter: true }));
+
+ipcMain.handle('smss:getPostStatus', () => getSmssPostStatus());
 
 ipcMain.handle('config:save', (_, config) => {
   const saved = writeConfig(config);

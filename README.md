@@ -4,7 +4,13 @@
 
 ## 현재 버전
 
-v2.3.1
+v2.3.2
+
+## v2.3.2 Changes
+- Fixed the SMSS train location page so the real `POST /traininfo/traininfoUserMap.do` stream is monitored and recovered when it stalls.
+- The status bar now shows the actual last successful train-info POST time instead of the injected in-page `alive` timer.
+- The station-save line-4 correction no longer forces an unnecessary reload when the SMSS page is already active.
+- NSIS installer files are generated as `Jinjeop.Line.Signage.v2.3.2.exe`.
 
 ## v2.3.1 주요 변경
 
@@ -50,7 +56,7 @@ v2.3.1
 GitHub Release에서 받은 설치 파일을 실행합니다.
 
 ```text
-Jinjeop.Line.Signage.v2.3.1.exe
+Jinjeop.Line.Signage.v2.3.2.exe
 ```
 
 설치 후 시작 메뉴 또는 바탕화면 바로가기로 실행합니다.
@@ -119,8 +125,8 @@ GitHub Release까지 배포:
 빌드 결과:
 
 ```text
-dist\Jinjeop.Line.Signage.v2.3.1.exe
-dist\Jinjeop.Line.Signage.v2.3.1.exe.blockmap
+dist\Jinjeop.Line.Signage.v2.3.2.exe
+dist\Jinjeop.Line.Signage.v2.3.2.exe.blockmap
 dist\latest.yml
 ```
 

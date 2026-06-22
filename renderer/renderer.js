@@ -27,6 +27,9 @@ const SMSS_LOAD_TIMEOUT_MS = 18000;
 const LINE4_ACTIVATION_RETRY_LIMIT = 10;
 const LINE4_ACTIVATION_RETRY_DELAY_MS = 650;
 const LINE4_IN_PAGE_ZOOM_CLICKS = 2;
+const SMSS_POST_WATCHDOG_INTERVAL_MS = 5000;
+const SMSS_POST_STALE_MS = 20000;
+const SMSS_POST_RECOVERY_COOLDOWN_MS = 30000;
 
 const solarTermDescriptions = {
   '입춘': '🌸 만물이 소생하는 봄의 시작을 알립니다!',
@@ -96,7 +99,12 @@ const state = {
   adviceLoading: false,
   weatherLastUpdatedAt: null,
   weatherLoadFailed: false,
-  smssLastAliveAt: null,
+  smssLastPostAt: null,
+  smssPostStatus: null,
+  smssPostWatchdogTimer: null,
+  smssPostWatchdogStartedAt: null,
+  smssPostRecoveryInProgress: false,
+  smssPostRecoveryLastRunAt: null,
   statusOverrideTimer: null,
   autoLine4Timer: null,
   autoLine4Attempts: 0,
@@ -629,6 +637,97 @@ function resetAutoLine4Activation(url) {
   state.pendingLine4ZoomInClicks = state.autoLine4TargetUrl ? LINE4_IN_PAGE_ZOOM_CLICKS : 0;
 }
 
+function isSmssPostWatchTargetActive() {
+  return [
+    getBrowserViewCurrentUrl(),
+    state.browserRequestedUrl,
+    state.draftConfig?.browser?.url
+  ].some(isSeoulMetroTrainInfoUrl);
+}
+
+function markSmssPostWatchdogBaseline() {
+  state.smssPostWatchdogStartedAt = Date.now();
+}
+
+function getSmssPostReferenceTime() {
+  const lastPostMs = Date.parse(state.smssLastPostAt || '');
+  if (Number.isFinite(lastPostMs)) {
+    return lastPostMs;
+  }
+  return state.smssPostWatchdogStartedAt || null;
+}
+
+function updateSmssPostStatus(status = {}) {
+  const lastSuccessAt = status.lastSuccessAt || status.time || status.at;
+  if (!lastSuccessAt || Number.isNaN(Date.parse(lastSuccessAt))) {
+    return;
+  }
+
+  state.smssLastPostAt = lastSuccessAt;
+  state.smssPostStatus = {
+    ...status,
+    lastSuccessAt
+  };
+  markSmssPostWatchdogBaseline();
+  updateStatusToast();
+}
+
+async function recoverSmssPostPolling(reason = 'post-watchdog') {
+  if (state.smssPostRecoveryInProgress || state.line4SequenceInProgress || !isSmssPostWatchTargetActive()) {
+    return false;
+  }
+
+  const now = Date.now();
+  const lastRecoveryMs = Date.parse(state.smssPostRecoveryLastRunAt || '');
+  if (Number.isFinite(lastRecoveryMs) && now - lastRecoveryMs < SMSS_POST_RECOVERY_COOLDOWN_MS) {
+    return false;
+  }
+
+  state.smssPostRecoveryInProgress = true;
+  state.smssPostRecoveryLastRunAt = new Date(now).toISOString();
+  markSmssPostWatchdogBaseline();
+  logSmssLayoutState('smss-post-watchdog-recovery', {
+    reason,
+    lastPostAt: state.smssLastPostAt,
+    secondsSinceLastPost: state.smssLastPostAt
+      ? Math.round((now - Date.parse(state.smssLastPostAt)) / 1000)
+      : null
+  });
+
+  try {
+    return await refreshBrowserAndActivateLine4(reason);
+  } finally {
+    state.smssPostRecoveryInProgress = false;
+  }
+}
+
+function checkSmssPostWatchdog() {
+  if (!isSmssPostWatchTargetActive() || state.line4SequenceInProgress || state.smssPostRecoveryInProgress) {
+    return;
+  }
+
+  if (isBrowserViewLoading()) {
+    return;
+  }
+
+  const referenceTime = getSmssPostReferenceTime();
+  if (!referenceTime || Date.now() - referenceTime < SMSS_POST_STALE_MS) {
+    return;
+  }
+
+  recoverSmssPostPolling().catch((err) => {
+    console.warn('SMSS POST watchdog recovery failed:', err);
+  });
+}
+
+function scheduleSmssPostWatchdog() {
+  if (state.smssPostWatchdogTimer) {
+    clearInterval(state.smssPostWatchdogTimer);
+  }
+  markSmssPostWatchdogBaseline();
+  state.smssPostWatchdogTimer = setInterval(checkSmssPostWatchdog, SMSS_POST_WATCHDOG_INTERVAL_MS);
+}
+
 function getBrowserPopupMode() {
   const mode = state.draftConfig?.browser?.popupMode || defaultConfig.browser.popupMode;
   return ['block', 'allow', 'current'].includes(mode) ? mode : 'block';
@@ -653,6 +752,9 @@ function loadBrowserUrlInWebview(rawUrl) {
   }
 
   logSmssLayoutState('load-url-request', { url });
+  if (isSeoulMetroTrainInfoUrl(url)) {
+    markSmssPostWatchdogBaseline();
+  }
 
   const currentUrl = normalizeUrl(
     (typeof els.browserView.getURL === 'function' && els.browserView.getURL())
@@ -1315,6 +1417,9 @@ function applyBrowserSettings() {
   const normalized = normalizeUrl(state.draftConfig.browser.url);
   state.draftConfig.browser.url = normalized;
   resetAutoLine4Activation(normalized);
+  if (isSeoulMetroTrainInfoUrl(normalized)) {
+    markSmssPostWatchdogBaseline();
+  }
   syncWebviewPopupPermission();
   loadBrowserUrlInWebview(normalized);
   applyBrowserZoom();
@@ -2327,6 +2432,24 @@ async function refreshBrowserAndActivateLine4(reason = 'manual-refresh') {
   return runLine4DisplaySequence(reason);
 }
 
+async function correctLine4AfterStationSave(reason = 'station-required-save') {
+  if (!els.browserView || state.autoLine4Triggered) {
+    return false;
+  }
+
+  const targetUrl = getLine4RefreshTargetUrl();
+  resetAutoLine4Activation(targetUrl);
+  state.browserRequestedUrl = targetUrl;
+  markSmssPostWatchdogBaseline();
+  logSmssLayoutState('line4-station-save-correction', { reason, url: targetUrl });
+
+  const currentUrl = normalizeUrl(getBrowserViewCurrentUrl() || 'about:blank');
+  if (!isSeoulMetroTrainInfoUrl(currentUrl)) {
+    await navigateBrowserForLine4(targetUrl, { reloadIfCurrent: false });
+  }
+  return runLine4DisplaySequence(reason);
+}
+
 function scheduleTrainInfoCorrectionAfterStationSave(reason = 'station-required-save') {
   clearTimeout(state.stationSaveTrainInfoCorrectionTimer);
   state.stationSaveTrainInfoCorrectionTimer = setTimeout(() => {
@@ -2334,7 +2457,14 @@ function scheduleTrainInfoCorrectionAfterStationSave(reason = 'station-required-
     if (state.stationRequirementActive) {
       return;
     }
-    refreshBrowserAndActivateLine4(reason).catch((err) => {
+    if (state.autoLine4Triggered) {
+      return;
+    }
+    if (state.line4SequenceInProgress) {
+      scheduleTrainInfoCorrectionAfterStationSave(reason);
+      return;
+    }
+    correctLine4AfterStationSave(reason).catch((err) => {
       console.warn('Train info correction after station save failed:', err);
     });
   }, 1200);
@@ -2844,7 +2974,7 @@ function applySettingsToForm() {
     els.checkAdminOptions.checked = !!state.draftConfig.ui?.adminOptionsEnabled;
   }
   if (els.appVersionText) {
-    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.3.1'}`;
+    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.3.2'}`;
   }
   if (els.checkAutoStart) {
     els.checkAutoStart.checked = !!state.draftConfig.window.autoStart;
@@ -4009,10 +4139,6 @@ function bindWebviewPopupHandling() {
     });
   });
 
-  els.browserView.addEventListener('console-message', (event) => {
-    updateSmssAliveStatusFromConsoleMessage(event.message);
-  });
-
   els.browserView.addEventListener('dom-ready', () => {
     logSmssLayoutState('webview-dom-ready');
     syncWebviewPopupPermission();
@@ -4579,8 +4705,10 @@ function updateStatusToast() {
       : '날씨 갱신 대기 중');
   }
 
-  if (state.smssLastAliveAt) {
-    parts.push(`웹 alive (${formatHourMinuteSecond(state.smssLastAliveAt)})`);
+  if (state.smssLastPostAt) {
+    parts.push(`웹 POST 성공 (${formatHourMinuteSecond(state.smssLastPostAt)})`);
+  } else if (isSmssPostWatchTargetActive()) {
+    parts.push('웹 POST 대기 중');
   }
 
   if (isSidebarWidgetVisible('trainSchedule')) {
@@ -4601,28 +4729,6 @@ function showStatusOverride(message) {
   els.weatherUpdateStatus.textContent = message;
   markUserActive();
   state.statusOverrideTimer = setTimeout(updateStatusToast, 6000);
-}
-
-function updateSmssAliveStatusFromConsoleMessage(message) {
-  const text = String(message || '');
-  const prefixMatch = text.match(/^\[SMSS INPAGE\]\s+(\{.*\})$/);
-  if (prefixMatch) {
-    try {
-      const payload = JSON.parse(prefixMatch[1]);
-      if (payload?.event === 'alive') {
-        state.smssLastAliveAt = payload.time || new Date().toISOString();
-        updateStatusToast();
-      }
-    } catch (_) {
-      // Ignore malformed diagnostic console payloads.
-    }
-    return;
-  }
-
-  if (/^alive\s+.+https:\/\/smss\.seoulmetro\.co\.kr\//.test(text)) {
-    state.smssLastAliveAt = new Date().toISOString();
-    updateStatusToast();
-  }
 }
 
 async function refreshTimetableManually() {
@@ -5455,6 +5561,14 @@ async function init() {
       renderUpdateStatus(status);
     });
   }
+  if (typeof window.desktopAPI.onSmssPostSuccess === 'function') {
+    window.desktopAPI.onSmssPostSuccess((status) => {
+      updateSmssPostStatus(status);
+    });
+  }
+  if (typeof window.desktopAPI.getSmssPostStatus === 'function') {
+    updateSmssPostStatus(await window.desktopAPI.getSmssPostStatus());
+  }
 
   setupSidebarSettingsPanel();
   applySettingsHelpTooltips();
@@ -5479,6 +5593,7 @@ async function init() {
   await refreshUpdateStatus();
   state.maintenanceStatusTimer = setInterval(renderMaintenanceStatus, 60 * 1000);
   scheduleTrainInfoAutoRefresh();
+  scheduleSmssPostWatchdog();
   renderPlaylist();
   updateBackgroundWidgetTasks();
   updateStatusToast();

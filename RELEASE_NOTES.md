@@ -1,15 +1,14 @@
-# Jinjeop Line Signage v2.3.1
+# Jinjeop Line Signage v2.3.2
 
-## 주요 변경
+## Changes
+- Fixed the regression where the Seoul Metro train location page could stop sending `POST /traininfo/traininfoUserMap.do` after refresh or page correction.
+- The status text now shows the real last successful train-info POST time instead of the injected in-page `alive` timer.
+- Added a 5-second POST watchdog that recovers the SMSS webview only when the real train-info POST stream goes stale.
+- Reduced the v2.3.1 first-station-save correction so it preserves the line-4 correction without forcing an unnecessary reload when the SMSS page is already active.
+- Added `--smoke-test-duration-ms=` for hidden extended smoke validation of the POST stream.
 
-- 첫 설치 후 현재 역명을 선택하고 저장한 직후 드래그 보정이 적용되지 않을 수 있던 문제를 수정했습니다.
-- 필수 역명 저장 시 위젯 설정창이 닫힌 뒤 열차 위치 정보 화면의 새로고침, 4호선 선택, 확대, 드래그 보정을 한 번 더 실행합니다.
-- 테스트/실행 환경의 출력 파이프가 닫힐 때 SMSS 진단 로그 출력 때문에 `EPIPE` JavaScript 오류 팝업이 뜰 수 있던 문제를 방지했습니다.
-- `--smoke-test` 실행 시 사용자 화면에 흰 창을 띄우지 않고 숨김 상태로 검증 후 종료하도록 수정했습니다.
-- 기존 자동 보정, 수동 제목 클릭 보정, 자동 새로고침 보정 흐름은 유지했습니다.
+## Release Files
 
-## 배포 파일
-
-- `Jinjeop.Line.Signage.v2.3.1.exe`
-- `Jinjeop.Line.Signage.v2.3.1.exe.blockmap`
+- `Jinjeop.Line.Signage.v2.3.2.exe`
+- `Jinjeop.Line.Signage.v2.3.2.exe.blockmap`
 - `latest.yml`

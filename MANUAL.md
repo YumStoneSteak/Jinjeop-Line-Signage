@@ -5,7 +5,7 @@
 
 ## 1. 실행
 
-1. GitHub Release에서 받은 `Jinjeop.Line.Signage.v2.3.1.exe`를 설치합니다.
+1. GitHub Release에서 받은 `Jinjeop.Line.Signage.v2.3.2.exe`를 설치합니다.
 2. 시작 메뉴 또는 바탕화면 바로가기로 앱을 실행합니다.
 3. 운영 화면으로 전환하려면 상단 메뉴의 **사이니지 모드 시작**을 누릅니다.
 4. 설정 메뉴를 다시 보려면 화면 맨 위로 마우스를 이동합니다.
