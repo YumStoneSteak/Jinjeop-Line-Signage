@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   checkForUpdates: () => ipcRenderer.invoke('updater:checkNow'),
   installUpdateNow: () => ipcRenderer.invoke('updater:installNow'),
   getSmssPostStatus: () => ipcRenderer.invoke('smss:getPostStatus'),
+  sendRuntimeHeartbeat: () => ipcRenderer.send('runtime:heartbeat'),
   getTimetableCache: () => ipcRenderer.invoke('timetable:getCache'),
   refreshTimetable: (station) => ipcRenderer.invoke('timetable:refresh', station),
   getSolarTermsYear: (year) => ipcRenderer.invoke('solarTerms:getYear', year),
@@ -43,5 +44,6 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   onBrowserZoomChanged: (callback) => ipcRenderer.on('browser:zoomChanged', (_, zoomPercent) => callback(zoomPercent)),
   onUpdateStatusChanged: (callback) => ipcRenderer.on('updater:statusChanged', (_, status) => callback(status)),
   onSmssPostSuccess: (callback) => ipcRenderer.on('smss:postSuccess', (_, status) => callback(status)),
+  onRuntimeResume: (callback) => ipcRenderer.on('runtime:resume', () => callback()),
   onFullscreenChanged: (callback) => ipcRenderer.on('window:fullscreenChanged', (_, isFullscreen) => callback(isFullscreen))
 });

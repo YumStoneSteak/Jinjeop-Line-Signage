@@ -94,9 +94,10 @@
       },
       maintenance: {
         autoUpdateEnabled: true,
-        updateTime: '01:00',
-        unavailableStartTime: '02:00',
-        unavailableEndTime: '04:30'
+        updateTime: '00:30',
+        unavailableStartTime: '01:30',
+        unavailableEndTime: '04:30',
+        preparationMinutes: 10
       },
       sidebar: {
         width: 350,

@@ -14,6 +14,14 @@ const {
   getDelayUntilUnavailableWindowEnds,
   getUnavailableWindowLabel
 } = window.dashboardMaintenanceUtils;
+const {
+  getDelayUntilNextLocalDay,
+  getLocalDateKey,
+  getNoticePublishState,
+  normalizeNoticeSchedule,
+  normalizePublishDate
+} = window.dashboardNoticeUtils;
+const { sendWebviewMouseDrag } = window.dashboardSmssDragUtils;
 const SETTING_HELP_TEXTS = window.dashboardSettingsHelp || {};
 const { getKoreanAirQuality } = window.dashboardAirQuality;
 const fallbackDailyAdvice = {
@@ -30,7 +38,7 @@ const LINE4_ACTIVATION_RETRY_DELAY_MS = 650;
 const LINE4_IN_PAGE_ZOOM_CLICKS = 2;
 const SMSS_POST_WATCHDOG_INTERVAL_MS = 5000;
 const SMSS_POST_STALE_MS = 20000;
-const SMSS_POST_RECOVERY_COOLDOWN_MS = 30000;
+const TIMETABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const DRAG_REPLAY_PROFILE_KEYS = ['noticeVisible', 'noticeHidden'];
 const DRAG_REPLAY_PROFILE_LABELS = {
   noticeVisible: '공지 영역 표시 중',
@@ -77,11 +85,14 @@ const state = {
   appVersion: '',
   savedConfig: null,
   draftConfig: null,
+  isDirty: false,
   isFullscreen: false,
   isPaused: false,
   currentIndex: 0,
   slideTimer: null,
+  noticePublishTimer: null,
   activeSlideKey: '',
+  runtimeUnplayableSlides: new Set(),
   dragIndex: null,
   sidebarWidgetDragIndex: null,
   tempToolbarTimer: null,
@@ -91,6 +102,8 @@ const state = {
   clockTimer: null,
   timetableCache: null,
   timetableTimer: null,
+  timetableDataRefreshTimer: null,
+  timetableDataRefreshInFlight: false,
   timetableRefreshFailed: false,
   timetableRuntimeErrors: [],
   solarTermYears: {},
@@ -103,15 +116,17 @@ const state = {
   dailyAdviceData: null,
   adviceTimer: null,
   adviceLoading: false,
+  weatherRequestInFlight: false,
   weatherLastUpdatedAt: null,
   weatherLoadFailed: false,
   smssLastPostAt: null,
   smssPostStatus: null,
   smssPostWatchdogTimer: null,
   smssPostWatchdogStartedAt: null,
-  smssPostRecoveryInProgress: false,
-  smssPostRecoveryLastRunAt: null,
+  smssPostStaleNotified: false,
+  dragReplayInProgress: false,
   statusOverrideTimer: null,
+  appToastTimer: null,
   autoLine4Timer: null,
   autoLine4Attempts: 0,
   autoLine4Triggered: false,
@@ -130,6 +145,7 @@ const state = {
   noticePanelHidden: false,
   maintenanceResumeTimer: null,
   maintenanceStatusTimer: null,
+  runtimeHeartbeatTimer: null,
   updateStatus: null,
   stationRequirementActive: false
 };
@@ -137,6 +153,8 @@ const state = {
 const els = {
   toolbar: document.getElementById('toolbar'),
   toolbarTitle: document.getElementById('toolbarTitle'),
+  toolbarUnsavedStatus: document.getElementById('toolbarUnsavedStatus'),
+  appToast: document.getElementById('appToast'),
   topHoverZone: document.getElementById('topHoverZone'),
   fullscreenSidebar: document.getElementById('fullscreenSidebar'),
   sidebarLogoImage: document.getElementById('sidebarLogoImage'),
@@ -177,7 +195,10 @@ const els = {
   browserTitleWidget: document.getElementById('browserTitleWidget'),
 
   mediaStage: document.getElementById('mediaStage'),
+  panelMedia: document.getElementById('panelMedia'),
   emptyState: document.getElementById('emptyState'),
+  emptyStateTitle: document.getElementById('emptyStateTitle'),
+  emptyStateDetail: document.getElementById('emptyStateDetail'),
   slideImage: document.getElementById('slideImage'),
   slideVideo: document.getElementById('slideVideo'),
   slideCaption: document.getElementById('slideCaption'),
@@ -195,8 +216,10 @@ const els = {
   btnAddFiles: document.getElementById('btnAddFiles'),
   btnCheckMissing: document.getElementById('btnCheckMissing'),
   btnResetNoticeSettings: document.getElementById('btnResetNoticeSettings'),
+  btnSaveNoticeSettings: document.getElementById('btnSaveNoticeSettings'),
   btnCloseFilePanel: document.getElementById('btnCloseFilePanel'),
   playlistTBody: document.querySelector('#playlistTable tbody'),
+  playlistSummary: document.getElementById('playlistSummary'),
 
   sidebarPanel: document.getElementById('sidebarPanel'),
   trainStationField: document.getElementById('trainStationField'),
@@ -294,15 +317,6 @@ function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
 }
 
-function normalizePublishDate(value) {
-  const text = typeof value === 'string' ? value.trim() : '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    return '';
-  }
-  const date = new Date(`${text}T00:00:00`);
-  return Number.isNaN(date.getTime()) ? '' : text;
-}
-
 function normalizeUiSettings(rawSettings) {
   const defaults = defaultConfig.ui || { adminOptionsEnabled: false };
   const source = rawSettings && typeof rawSettings === 'object' ? rawSettings : {};
@@ -376,13 +390,17 @@ function normalizeForSave(config) {
   };
   clone.player = {
     transition: normalizeTransition(playerConfig.transition),
-    playlist: (Array.isArray(playerConfig.playlist) ? playerConfig.playlist : []).map((item) => ({
-      path: item.path,
-      type: item.type,
-      duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
-      publishStartDate: normalizePublishDate(item.publishStartDate),
-      publishEndDate: normalizePublishDate(item.publishEndDate)
-    }))
+    playlist: (Array.isArray(playerConfig.playlist) ? playerConfig.playlist : []).map((item) => {
+      const schedule = normalizeNoticeSchedule(item);
+      return {
+        path: item.path,
+        type: item.type,
+        duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
+        addedDate: schedule.addedDate,
+        publishStartDate: schedule.publishStartDate,
+        publishEndDate: schedule.publishEndDate
+      };
+    })
   };
   return clone;
 }
@@ -413,11 +431,13 @@ function createPlaylistItemFromPickedMedia(picked) {
 
   const ext = filePath.split('.').pop().toLowerCase();
   const type = picked?.type === 'video' || ['mp4', 'webm'].includes(ext) ? 'video' : 'image';
+  const addedDate = getLocalDateKey();
   return {
     path: filePath,
     type,
     duration: type === 'video' ? 30 : 5,
-    publishStartDate: '',
+    addedDate,
+    publishStartDate: addedDate,
     publishEndDate: '',
     missing: picked?.exists === false
   };
@@ -573,7 +593,11 @@ function isSidebarWidgetVisible(widgetId) {
 }
 
 function isSidebarWidgetRuntimeHidden(widgetId) {
-  return widgetId === 'weather' && state.weatherLoadFailed;
+  if (widgetId === 'weather') return state.weatherLoadFailed;
+  if (widgetId === 'trainSchedule') return state.timetableRefreshFailed;
+  if (widgetId === 'solarTerm') return !getSolarTermDisplayInfo();
+  if (widgetId === 'dailyAdvice') return !state.dailyAdviceData;
+  return false;
 }
 
 function isSidebarWidgetShown(widgetId) {
@@ -765,41 +789,13 @@ function updateSmssPostStatus(status = {}) {
     ...status,
     lastSuccessAt
   };
+  state.smssPostStaleNotified = false;
   markSmssPostWatchdogBaseline();
   updateStatusToast();
 }
 
-async function recoverSmssPostPolling(reason = 'post-watchdog') {
-  if (state.smssPostRecoveryInProgress || state.line4SequenceInProgress || !isSmssPostWatchTargetActive()) {
-    return false;
-  }
-
-  const now = Date.now();
-  const lastRecoveryMs = Date.parse(state.smssPostRecoveryLastRunAt || '');
-  if (Number.isFinite(lastRecoveryMs) && now - lastRecoveryMs < SMSS_POST_RECOVERY_COOLDOWN_MS) {
-    return false;
-  }
-
-  state.smssPostRecoveryInProgress = true;
-  state.smssPostRecoveryLastRunAt = new Date(now).toISOString();
-  markSmssPostWatchdogBaseline();
-  logSmssLayoutState('smss-post-watchdog-recovery', {
-    reason,
-    lastPostAt: state.smssLastPostAt,
-    secondsSinceLastPost: state.smssLastPostAt
-      ? Math.round((now - Date.parse(state.smssLastPostAt)) / 1000)
-      : null
-  });
-
-  try {
-    return await refreshBrowserAndActivateLine4(reason);
-  } finally {
-    state.smssPostRecoveryInProgress = false;
-  }
-}
-
 function checkSmssPostWatchdog() {
-  if (!isSmssPostWatchTargetActive() || state.line4SequenceInProgress || state.smssPostRecoveryInProgress) {
+  if (!isSmssPostWatchTargetActive() || state.line4SequenceInProgress) {
     return;
   }
 
@@ -811,10 +807,13 @@ function checkSmssPostWatchdog() {
   if (!referenceTime || Date.now() - referenceTime < SMSS_POST_STALE_MS) {
     return;
   }
-
-  recoverSmssPostPolling().catch((err) => {
-    console.warn('SMSS POST watchdog recovery failed:', err);
-  });
+  if (!state.smssPostStaleNotified) {
+    state.smssPostStaleNotified = true;
+    logSmssLayoutState('smss-post-stale-screen-preserved', {
+      lastPostAt: state.smssLastPostAt,
+      policy: 'keep-current-web-screen-visible'
+    });
+  }
 }
 
 function scheduleSmssPostWatchdog() {
@@ -949,7 +948,7 @@ function suppressInPagePopups() {
 
 function clearSmssFocusArtifacts() {
   if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
-    return;
+    return Promise.resolve(null);
   }
 
   const script = `
@@ -962,6 +961,13 @@ function clearSmssFocusArtifacts() {
         const style = document.createElement('style');
         style.id = styleId;
         style.textContent = [
+          'html, body, body * {',
+          '  -webkit-user-select: none !important;',
+          '  user-select: none !important;',
+          '}',
+          'img {',
+          '  -webkit-user-drag: none !important;',
+          '}',
           '.tip[tabindex], .tip[tabindex]:focus, .tip[tabindex]:focus-visible,',
           '[class^="T04"][tabindex], [class^="T04"][tabindex]:focus, [class^="T04"][tabindex]:focus-visible,',
           '[class*=" T04"][tabindex], [class*=" T04"][tabindex]:focus, [class*=" T04"][tabindex]:focus-visible {',
@@ -971,6 +977,23 @@ function clearSmssFocusArtifacts() {
         ].join('\\n');
         (document.head || document.documentElement).appendChild(style);
       }
+
+      const clearSelection = () => {
+        const selection = typeof window.getSelection === 'function' ? window.getSelection() : null;
+        const hadSelection = !!selection && selection.rangeCount > 0 && !selection.isCollapsed;
+        try {
+          selection?.removeAllRanges();
+        } catch (_) {}
+        try {
+          document.selection?.empty?.();
+        } catch (_) {}
+        return hadSelection;
+      };
+
+      const hadSelection = clearSelection();
+      document.querySelectorAll('img').forEach((image) => {
+        image.draggable = false;
+      });
 
       const isTrainMarker = (node) => {
         if (!node || node.nodeType !== 1 || typeof node.matches !== 'function') {
@@ -986,6 +1009,19 @@ function clearSmssFocusArtifacts() {
 
       if (!window.__dashboardSmssFocusCleanupBound__) {
         window.__dashboardSmssFocusCleanupBound__ = true;
+        window.__dashboardClearSmssSelection__ = clearSelection;
+        document.addEventListener('selectstart', (event) => {
+          event.preventDefault();
+        }, true);
+        document.addEventListener('dragstart', (event) => {
+          const target = event.target;
+          if (target?.closest?.('img, .tip, [class^="T04"], [class*=" T04"]')) {
+            event.preventDefault();
+          }
+        }, true);
+        document.addEventListener('mousedown', () => {
+          window.__dashboardClearSmssSelection__?.();
+        }, true);
         document.addEventListener('focusin', (event) => {
           const target = event.target;
           if (isTrainMarker(target) && typeof target.blur === 'function') {
@@ -994,11 +1030,17 @@ function clearSmssFocusArtifacts() {
         }, true);
       }
 
-      return true;
+      const selectionAfter = typeof window.getSelection === 'function' ? window.getSelection() : null;
+      return {
+        installed: true,
+        hadSelection,
+        rangeCountAfter: selectionAfter?.rangeCount || 0,
+        selectionCollapsedAfter: selectionAfter?.isCollapsed !== false
+      };
     })();
   `;
 
-  els.browserView.executeJavaScript(script, false).catch(() => {});
+  return els.browserView.executeJavaScript(script, false).catch(() => null);
 }
 
 function ratioFromPercent(leftPercent) {
@@ -1036,34 +1078,61 @@ function getPlayableCount(list = state.draftConfig.player.playlist) {
   return list.filter((item) => isPlaylistItemPlayable(item)).length;
 }
 
-function getTodayDateKey() {
-  const now = new Date();
-  const local = new Date(now.getTime() - (now.getTimezoneOffset() * 60000));
-  return local.toISOString().slice(0, 10);
-}
-
-function getPlaylistItemPublishState(item, today = getTodayDateKey()) {
+function getPlaylistItemPublishState(item, today = getLocalDateKey()) {
   if (item?.missing) {
     return { playable: false, label: '⚠ 누락', className: 'warn' };
   }
 
-  const startDate = normalizePublishDate(item?.publishStartDate);
-  const endDate = normalizePublishDate(item?.publishEndDate);
-  if (startDate && endDate && startDate > endDate) {
-    return { playable: false, label: '기간 오류', className: 'warn' };
-  }
-  if (startDate && today < startDate) {
-    return { playable: false, label: '게시 전', className: 'muted' };
-  }
-  if (endDate && today > endDate) {
-    return { playable: false, label: '게시 종료', className: 'muted' };
-  }
+  const publishState = getNoticePublishState(item, today);
+  const labels = {
+    'invalid-period': { label: '기간 오류', className: 'warn' },
+    scheduled: { label: '게시 전', className: 'muted' },
+    ended: { label: '게시 종료', className: 'muted' },
+    active: { label: '게시 중', className: '' },
+    normal: { label: '정상', className: '' }
+  };
+  return {
+    playable: publishState.playable,
+    ...(labels[publishState.code] || labels.normal)
+  };
+}
 
-  return { playable: true, label: (startDate || endDate) ? '게시 중' : '정상', className: '' };
+function refreshNoticePublishState() {
+  if (!state.draftConfig?.player?.playlist) {
+    return;
+  }
+  renderPlaylist();
+  showSlide(state.currentIndex, { force: true });
+}
+
+function scheduleNoticePublishStateRefresh() {
+  if (state.noticePublishTimer) {
+    clearTimeout(state.noticePublishTimer);
+  }
+  state.noticePublishTimer = setTimeout(() => {
+    state.noticePublishTimer = null;
+    refreshNoticePublishState();
+    scheduleNoticePublishStateRefresh();
+  }, getDelayUntilNextLocalDay());
 }
 
 function isPlaylistItemPlayable(item) {
-  return getPlaylistItemPublishState(item).playable;
+  return getPlaylistItemPublishState(item).playable && !state.runtimeUnplayableSlides.has(getSlideKey(item));
+}
+
+function markSlideRuntimeUnplayable(item) {
+  if (!item) {
+    return;
+  }
+  state.runtimeUnplayableSlides.add(getSlideKey(item));
+  applyLayout();
+  const list = state.draftConfig?.player?.playlist || [];
+  const nextIndex = list.length ? getPlayableIndex((state.currentIndex + 1) % list.length) : -1;
+  if (nextIndex >= 0) {
+    showSlide(nextIndex, { force: true });
+  } else {
+    showEmptyState();
+  }
 }
 
 function clearSlideTimer() {
@@ -1101,8 +1170,21 @@ function hideMediaElements() {
 
 function showEmptyState() {
   hideMediaElements();
+  const list = state.draftConfig?.player?.playlist || [];
+  const hasConfiguredNotice = list.length > 0;
+  els.panelMedia?.classList.add('media-empty');
   els.emptyState.style.display = 'block';
-  els.slideCaption.textContent = '재생 가능한 파일이 없습니다.';
+  if (els.emptyStateTitle) {
+    els.emptyStateTitle.textContent = hasConfiguredNotice
+      ? '현재 재생 가능한 공지가 없습니다.'
+      : '표시할 공지가 없습니다.';
+  }
+  if (els.emptyStateDetail) {
+    els.emptyStateDetail.textContent = hasConfiguredNotice
+      ? '게시 일정과 파일 상태를 확인해 주세요.'
+      : '상단의 ‘공지’에서 이미지나 동영상을 추가하세요.';
+  }
+  els.slideCaption.textContent = '';
 }
 
 function scheduleNext(ms) {
@@ -1150,10 +1232,13 @@ function showSlide(index, options = {}) {
   }
 
   hideMediaElements();
+  els.panelMedia?.classList.remove('media-empty');
   els.emptyState.style.display = 'none';
   els.slideCaption.textContent = `${getFilename(item.path)} (${item.type})`;
 
   if (item.type === 'image') {
+    els.slideImage.onload = () => state.runtimeUnplayableSlides.delete(slideKey);
+    els.slideImage.onerror = () => markSlideRuntimeUnplayable(item);
     els.slideImage.src = pathToFileUrl(item.path);
     els.slideImage.classList.add('active');
     state.activeSlideKey = slideKey;
@@ -1187,9 +1272,10 @@ function showSlide(index, options = {}) {
     nextSlide();
   };
 
+  els.slideVideo.onerror = () => markSlideRuntimeUnplayable(item);
+
   els.slideVideo.play().catch(() => {
-    // Invalid or unsupported file: skip immediately.
-    nextSlide();
+    markSlideRuntimeUnplayable(item);
   });
 }
 
@@ -1208,6 +1294,7 @@ function nextSlide() {
 }
 
 async function refreshMissingFlags() {
+  state.runtimeUnplayableSlides.clear();
   const list = state.draftConfig.player.playlist;
   if (!list.length) {
     applyLayout();
@@ -2295,24 +2382,11 @@ async function sendWebviewDragInput(points) {
   if (!els.browserView || typeof els.browserView.sendInputEvent !== 'function') {
     return false;
   }
-
-  const steps = Math.min(32, Math.max(4, Math.ceil(points.durationMs / 80)));
-  const stepDelay = Math.max(20, Math.round(points.durationMs / steps));
-  const send = (event) => els.browserView.sendInputEvent(event);
-
-  send({ type: 'mouseMove', x: points.startX, y: points.startY, movementX: 0, movementY: 0 });
-  await delay(60);
-  send({ type: 'mouseDown', x: points.startX, y: points.startY, button: 'left', clickCount: 1 });
-  for (let step = 1; step <= steps; step += 1) {
-    const ratio = step / steps;
-    const x = Math.round(points.startX + ((points.endX - points.startX) * ratio));
-    const y = Math.round(points.startY + ((points.endY - points.startY) * ratio));
-    await delay(stepDelay);
-    send({ type: 'mouseMove', x, y, button: 'left', movementX: x - points.startX, movementY: y - points.startY });
-  }
-  await delay(50);
-  send({ type: 'mouseUp', x: points.endX, y: points.endY, button: 'left', clickCount: 1 });
-  return true;
+  return sendWebviewMouseDrag(
+    points,
+    (event) => els.browserView.sendInputEvent(event),
+    delay
+  );
 }
 
 async function dispatchSyntheticWebviewDrag(gesture) {
@@ -2395,33 +2469,47 @@ async function dispatchSyntheticWebviewDrag(gesture) {
 
 async function replaySmssDragIfEnabled() {
   const settings = getActiveDraftDragReplaySettings();
-  if (!settings.enabled || !settings.gesture || !els.browserView) {
+  if (!settings.enabled || !settings.gesture || !els.browserView || state.dragReplayInProgress) {
     return false;
   }
 
-  await delay(350);
-  const viewport = await getWebviewViewportSize();
-  const hostRect = els.browserView.getBoundingClientRect?.();
-  const points = gestureToViewportPoints(settings.gesture, viewport || hostRect);
-  if (!points) {
-    return false;
-  }
-
+  state.dragReplayInProgress = true;
+  let method = 'none';
+  let cleanupBefore = null;
   try {
-    const sent = await sendWebviewDragInput(points);
-    if (sent) {
-      clearSmssFocusArtifacts();
-      return true;
+    cleanupBefore = await clearSmssFocusArtifacts();
+    await delay(350);
+    const viewport = await getWebviewViewportSize();
+    const hostRect = els.browserView.getBoundingClientRect?.();
+    const points = gestureToViewportPoints(settings.gesture, viewport || hostRect);
+    if (!points) {
+      return false;
     }
-  } catch (err) {
-    console.warn('Drag replay input event failed:', err);
-  }
 
-  const syntheticSent = await dispatchSyntheticWebviewDrag(settings.gesture);
-  if (syntheticSent) {
-    clearSmssFocusArtifacts();
+    try {
+      const sent = await sendWebviewDragInput(points);
+      if (sent) {
+        method = 'webview-input';
+        return true;
+      }
+    } catch (err) {
+      console.warn('Drag replay input event failed:', err);
+    }
+
+    const syntheticSent = await dispatchSyntheticWebviewDrag(settings.gesture);
+    if (syntheticSent) {
+      method = 'synthetic-dom';
+    }
+    return syntheticSent;
+  } finally {
+    const cleanupAfter = await clearSmssFocusArtifacts();
+    state.dragReplayInProgress = false;
+    logSmssLayoutState('smss-drag-replay-cleanup', {
+      method,
+      cleanupBefore,
+      cleanupAfter
+    });
   }
-  return syntheticSent;
 }
 
 async function activateLine4InBrowser() {
@@ -2667,7 +2755,11 @@ async function getDragReplayVerificationSnapshot() {
 }
 
 async function runLine4DisplaySequence(reason = 'manual') {
-  if (!els.browserView || !state.autoLine4TargetUrl) {
+  if (!els.browserView || !state.autoLine4TargetUrl || state.line4SequenceInProgress) {
+    logSmssLayoutState('line4-sequence-skipped', {
+      reason,
+      sequenceInProgress: state.line4SequenceInProgress
+    });
     return false;
   }
 
@@ -2739,7 +2831,12 @@ async function runLine4DisplaySequence(reason = 'manual') {
 }
 
 async function refreshBrowserAndActivateLine4(reason = 'manual-refresh') {
-  if (!els.browserView) {
+  if (!els.browserView || state.line4SequenceInProgress || state.dragReplayInProgress) {
+    logSmssLayoutState('line4-refresh-skipped', {
+      reason,
+      sequenceInProgress: state.line4SequenceInProgress,
+      dragReplayInProgress: state.dragReplayInProgress
+    });
     return false;
   }
 
@@ -2753,7 +2850,7 @@ async function refreshBrowserAndActivateLine4(reason = 'manual-refresh') {
 }
 
 async function correctLine4AfterStationSave(reason = 'station-required-save') {
-  if (!els.browserView || state.autoLine4Triggered) {
+  if (!els.browserView || state.autoLine4Triggered || state.line4SequenceInProgress || state.dragReplayInProgress) {
     return false;
   }
 
@@ -3298,7 +3395,9 @@ function applySettingsToForm() {
     els.checkAdminOptions.checked = !!state.draftConfig.ui?.adminOptionsEnabled;
   }
   if (els.appVersionText) {
-    els.appVersionText.textContent = `현재 버전: v${state.appVersion || '2.3.2'}`;
+    els.appVersionText.textContent = state.appVersion
+      ? `현재 버전: v${state.appVersion}`
+      : '현재 버전: 확인 중';
   }
   if (els.checkAutoStart) {
     els.checkAutoStart.checked = !!state.draftConfig.window.autoStart;
@@ -3607,7 +3706,12 @@ function setWeatherWidgetLoadFailed(loadFailed) {
   }
 
   state.weatherLoadFailed = nextValue;
-  getSidebarWidgetElement('weather')?.classList.toggle('widget-runtime-hidden', state.weatherLoadFailed);
+  const weatherElements = els.fullscreenSidebar?.querySelectorAll(
+    '.weather-location-card, .weather-main-card, .weather-duo, .weather-mini-card'
+  ) || [];
+  weatherElements.forEach((element) => {
+    element.classList.toggle('widget-runtime-hidden', state.weatherLoadFailed);
+  });
   renderSidebarWidgetControls();
 }
 
@@ -3672,9 +3776,76 @@ function isAnyPanelOpen() {
     || !els.sidebarPanel.classList.contains('hidden');
 }
 
+function getNoticeIdentity(item) {
+  return `${item?.type || ''}:${String(item?.path || '').trim().toLowerCase()}`;
+}
+
+async function addNoticeFiles() {
+  const selected = await window.desktopAPI.pickMediaFiles();
+  if (!Array.isArray(selected) || !selected.length) {
+    return { added: 0, duplicate: 0 };
+  }
+
+  const existing = new Set(state.draftConfig.player.playlist.map(getNoticeIdentity));
+  let added = 0;
+  let duplicate = 0;
+  selected
+    .map(createPlaylistItemFromPickedMedia)
+    .filter(Boolean)
+    .forEach((item) => {
+      const identity = getNoticeIdentity(item);
+      if (existing.has(identity)) {
+        duplicate += 1;
+        return;
+      }
+      existing.add(identity);
+      state.draftConfig.player.playlist.push(item);
+      added += 1;
+    });
+
+  if (added > 0) {
+    renderPlaylist();
+    await refreshMissingFlags();
+    showStatusOverride(`${added}개 공지를 추가했습니다. ‘공지 저장’을 눌러 완료해 주세요.${duplicate ? ` 중복 ${duplicate}개는 제외했습니다.` : ''}`);
+  } else if (duplicate > 0) {
+    showStatusOverride(`이미 등록된 공지 ${duplicate}개를 제외했습니다.`);
+  }
+
+  return { added, duplicate };
+}
+
 function renderPlaylist() {
   const list = state.draftConfig.player.playlist;
   els.playlistTBody.innerHTML = '';
+
+  const playableCount = getPlayableCount(list);
+  if (els.playlistSummary) {
+    els.playlistSummary.textContent = `전체 ${list.length}개 · 현재 재생 ${playableCount}개`;
+  }
+  if (els.btnCheckMissing) {
+    els.btnCheckMissing.disabled = list.length === 0;
+  }
+
+  if (!list.length) {
+    const emptyRow = document.createElement('tr');
+    emptyRow.innerHTML = `
+      <td class="playlist-empty-cell" colspan="8">
+        <div class="playlist-empty-content">
+          <strong>등록된 공지가 없습니다.</strong>
+          <span>이미지 또는 동영상 파일을 추가해 재생 목록을 시작하세요.</span>
+          <button class="playlist-empty-add" type="button">첫 공지 파일 추가</button>
+        </div>
+      </td>
+    `;
+    emptyRow.querySelector('.playlist-empty-add')?.addEventListener('click', () => {
+      addNoticeFiles().catch((err) => {
+        console.error('Failed to add notice files:', err);
+        showAppToast('공지 파일을 추가하지 못했습니다.', { tone: 'error', duration: 5000 });
+      });
+    });
+    els.playlistTBody.appendChild(emptyRow);
+    return;
+  }
 
   list.forEach((item, index) => {
     const tr = document.createElement('tr');
@@ -3684,16 +3855,17 @@ function renderPlaylist() {
 
     const typeText = item.type === 'video' ? '동영상' : '이미지';
     const publishState = getPlaylistItemPublishState(item);
+    const filename = getFilename(item.path);
 
     tr.innerHTML = `
-      <td class="drag-handle">≡</td>
-      <td class="playlist-filename" title="${escapeHtml(getFilename(item.path))}">${escapeHtml(getFilename(item.path))}</td>
+      <td class="drag-handle" title="${escapeHtml(filename)} 순서 변경" aria-label="${escapeHtml(filename)} 순서 변경">≡</td>
+      <td class="playlist-filename" title="${escapeHtml(filename)}">${escapeHtml(filename)}</td>
       <td>${typeText}</td>
       <td><input class="duration-input" type="number" min="1" value="${Number(item.duration) || 5}" ${item.type === 'video' ? 'disabled' : ''} /></td>
       <td><input class="publish-date-input publish-start-input" type="date" value="${normalizePublishDate(item.publishStartDate)}" aria-label="게시 시작일" /></td>
       <td><input class="publish-date-input publish-end-input" type="date" value="${normalizePublishDate(item.publishEndDate)}" aria-label="게시 종료일" /></td>
       <td class="${publishState.className}">${publishState.label}</td>
-      <td><button class="delete-btn">🗑</button></td>
+      <td><button class="delete-btn" type="button" title="${escapeHtml(filename)} 삭제" aria-label="${escapeHtml(filename)} 삭제">🗑</button></td>
     `;
 
     const durationInput = tr.querySelector('.duration-input');
@@ -3710,11 +3882,14 @@ function renderPlaylist() {
       if (!target) {
         return;
       }
-      target.publishStartDate = normalizePublishDate(publishStartInput.value);
-      target.publishEndDate = normalizePublishDate(publishEndInput.value);
-      applyLayout();
-      renderPlaylist();
-      showSlide(state.currentIndex, { force: true });
+      const schedule = normalizeNoticeSchedule({
+        ...target,
+        publishStartDate: publishStartInput.value,
+        publishEndDate: publishEndInput.value
+      }, target.addedDate);
+      Object.assign(target, schedule);
+      refreshNoticePublishState();
+      scheduleNoticePublishStateRefresh();
       syncDraftState();
     };
     publishStartInput.addEventListener('change', updatePublishDates);
@@ -3764,33 +3939,57 @@ function renderPlaylist() {
   });
 }
 
+function updateDirtyUi(dirty) {
+  state.isDirty = !!dirty;
+  document.body.classList.toggle('settings-dirty', state.isDirty);
+  const label = state.isDirty ? '저장하지 않은 변경 사항' : '모든 변경 사항 저장됨';
+  if (els.toolbarUnsavedStatus) {
+    els.toolbarUnsavedStatus.textContent = state.isDirty ? '저장 필요' : '저장됨';
+  }
+  document.querySelectorAll('.panel-save-state').forEach((element) => {
+    element.textContent = label;
+  });
+}
+
 async function syncDraftState() {
   const normalized = normalizeForSave(state.draftConfig);
-  await window.desktopAPI.updateDraft(normalized);
   const dirty = !configsEqual(state.savedConfig, normalized);
+  updateDirtyUi(dirty);
+  await window.desktopAPI.updateDraft(normalized);
   await window.desktopAPI.setDirty(dirty);
 }
 
-async function saveSettingsToDisk() {
-  const normalized = normalizeForSave(state.draftConfig);
-  const saved = await window.desktopAPI.saveConfig(normalized);
-  state.savedConfig = deepClone(saved);
-  state.draftConfig = mergeUIState(state.draftConfig, state.savedConfig);
-  await window.desktopAPI.setDirty(false);
-  applyLayout();
-  applySidebarWidth(state.draftConfig.sidebar?.width);
-  applySidebarLogo();
-  applySidebarWidgets();
-  updateStationDisplayName();
-  applyBrowserSettings();
-  applySettingsToForm();
-  await refreshStartupStatus();
-  await refreshUpdateStatus();
-  scheduleTrainInfoAutoRefresh();
-  renderPlaylist();
-  showSlide(state.currentIndex);
-  updateBackgroundWidgetTasks();
-  updateStationRequirementUi();
+async function saveSettingsToDisk({ toastMessage = '' } = {}) {
+  try {
+    const normalized = normalizeForSave(state.draftConfig);
+    const saved = await window.desktopAPI.saveConfig(normalized);
+    state.savedConfig = deepClone(saved);
+    state.draftConfig = mergeUIState(state.draftConfig, state.savedConfig);
+    await window.desktopAPI.setDirty(false);
+    updateDirtyUi(false);
+    applyLayout();
+    applySidebarWidth(state.draftConfig.sidebar?.width);
+    applySidebarLogo();
+    applySidebarWidgets();
+    updateStationDisplayName();
+    applyBrowserSettings();
+    applySettingsToForm();
+    await refreshStartupStatus();
+    await refreshUpdateStatus();
+    scheduleTrainInfoAutoRefresh();
+    renderPlaylist();
+    showSlide(state.currentIndex);
+    updateBackgroundWidgetTasks();
+    updateStationRequirementUi();
+    if (toastMessage) {
+      showAppToast(toastMessage);
+    }
+    return true;
+  } catch (err) {
+    console.error('Failed to save settings:', err);
+    showAppToast('설정을 저장하지 못했습니다. 다시 시도해 주세요.', { tone: 'error', duration: 5000 });
+    return false;
+  }
 }
 
 function applyDraftConfigToUI({ firstSlide = false } = {}) {
@@ -4000,10 +4199,12 @@ function bindSettingsForm() {
         return;
       }
       setDraftDragReplaySettings({ gesture, defaultGesture: gesture }, profileKey);
-      renderDragReplayStatus('드래그 보정 기본값이 저장되었습니다.', profileKey);
-      showStatusOverride(`${DRAG_REPLAY_PROFILE_LABELS[profileKey]} 드래그 보정 기본값이 저장되었습니다.`);
-      await saveSettingsToDisk();
-      await syncDraftState();
+      const saved = await saveSettingsToDisk({
+        toastMessage: `${DRAG_REPLAY_PROFILE_LABELS[profileKey]} 드래그 보정 기본값이 저장되었습니다.`
+      });
+      if (saved) {
+        renderDragReplayStatus('드래그 보정 기본값이 저장되었습니다.', profileKey);
+      }
     });
 
     [
@@ -4041,6 +4242,14 @@ function bindToolbarAndPanels() {
     if (state.stationRequirementActive) {
       enforceRequiredStationSelection();
       return;
+    }
+    if (state.isDirty) {
+      const saved = await saveSettingsToDisk({
+        toastMessage: '변경 사항을 저장하고 사이니지 모드를 시작합니다.'
+      });
+      if (!saved) {
+        return;
+      }
     }
     state.isFullscreen = await window.desktopAPI.toggleFullscreen();
     updateToolbarVisibility();
@@ -4119,7 +4328,10 @@ function bindToolbarAndPanels() {
     const wasStationRequirementActive = state.stationRequirementActive;
     const previousSavedStationCode = normalizeTimetableSettings(state.savedConfig?.sidebar?.timetable).stationCode;
     const nextStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
-    await saveSettingsToDisk();
+    const saved = await saveSettingsToDisk({ toastMessage: '위젯 설정이 저장되었습니다.' });
+    if (!saved) {
+      return;
+    }
     setPanelVisible(els.sidebarPanel, false);
     if (wasStationRequirementActive && !previousSavedStationCode && nextStationCode) {
       scheduleTrainInfoCorrectionAfterStationSave();
@@ -4153,8 +4365,19 @@ function bindToolbarAndPanels() {
   });
 
   els.btnSaveSettings.addEventListener('click', async () => {
-    await saveSettingsToDisk();
+    const saved = await saveSettingsToDisk({ toastMessage: '일반 설정이 저장되었습니다.' });
+    if (!saved) {
+      return;
+    }
     setPanelVisible(els.settingsPanel, false);
+  });
+
+  els.btnSaveNoticeSettings?.addEventListener('click', async () => {
+    const saved = await saveSettingsToDisk({ toastMessage: '공지 설정이 저장되었습니다.' });
+    if (!saved) {
+      return;
+    }
+    setPanelVisible(els.filePanel, false);
   });
 
   els.btnOpenStartupFolder?.addEventListener('click', async () => {
@@ -4230,7 +4453,10 @@ function bindToolbarAndPanels() {
   });
 
   els.btnSaveTrainInfoSettings?.addEventListener('click', async () => {
-    await saveSettingsToDisk();
+    const saved = await saveSettingsToDisk({ toastMessage: '열차 위치 정보 설정이 저장되었습니다.' });
+    if (!saved) {
+      return;
+    }
     setPanelVisible(els.trainInfoPanel, false);
   });
 
@@ -4266,24 +4492,16 @@ function bindToolbarAndPanels() {
     }
     state.currentIndex = 0;
     state.draftConfig = mergeUIState(state.draftConfig, createDefaultConfigForReset());
-    await saveSettingsToDisk();
+    await saveSettingsToDisk({ toastMessage: '전체 설정을 초기화하고 저장했습니다.' });
   });
 
   els.btnAddFiles.addEventListener('click', async () => {
-    const selected = await window.desktopAPI.pickMediaFiles();
-    if (!selected.length) {
-      return;
+    try {
+      await addNoticeFiles();
+    } catch (err) {
+      console.error('Failed to add notice files:', err);
+      showAppToast('공지 파일을 추가하지 못했습니다.', { tone: 'error', duration: 5000 });
     }
-
-    selected
-      .map(createPlaylistItemFromPickedMedia)
-      .filter(Boolean)
-      .forEach((item) => {
-        state.draftConfig.player.playlist.push(item);
-      });
-
-    renderPlaylist();
-    await refreshMissingFlags();
   });
 
   els.btnCheckMissing.addEventListener('click', async () => {
@@ -4863,6 +5081,11 @@ function getSelectedStationCache() {
   return state.timetableCache?.stations?.[settings.stationCode] || null;
 }
 
+function isTimetableCacheFresh(cache) {
+  const updatedAt = Date.parse(cache?.updatedAt || '');
+  return Number.isFinite(updatedAt) && Date.now() - updatedAt <= TIMETABLE_MAX_AGE_MS;
+}
+
 function updateNextTrainWidget() {
   try {
     if (!isSidebarWidgetVisible('trainSchedule')) {
@@ -4878,7 +5101,7 @@ function updateNextTrainWidget() {
       return;
     }
     const stationCache = getSelectedStationCache();
-    if (!stationCache || state.timetableRefreshFailed) {
+    if (!stationCache || state.timetableRefreshFailed || !isTimetableCacheFresh(stationCache)) {
       clearNextTrainWidget();
       if (!stationCache) {
         addTimetableRuntimeError('선택한 역의 시간표 캐시 없음', `${settings.stationName} 캐시가 없습니다.`);
@@ -4956,10 +5179,42 @@ async function ensureTimetableCacheLoaded() {
   renderTimetableSettingsStatus();
 }
 
+async function refreshTimetableInBackground() {
+  if (state.timetableDataRefreshInFlight || isAutomaticWorkSuspended()) {
+    return;
+  }
+  const settings = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable);
+  if (!settings.stationCode || !isSidebarWidgetVisible('trainSchedule')) {
+    return;
+  }
+
+  state.timetableDataRefreshInFlight = true;
+  try {
+    const result = await window.desktopAPI.refreshTimetable(settings);
+    state.timetableCache = result?.cache || state.timetableCache;
+    state.timetableRefreshFailed = !result?.ok;
+    els.nextTrainWidget?.classList.toggle('widget-runtime-hidden', state.timetableRefreshFailed);
+    if (result?.ok) {
+      state.timetableRuntimeErrors = [];
+    }
+  } catch (err) {
+    state.timetableRefreshFailed = true;
+    els.nextTrainWidget?.classList.add('widget-runtime-hidden');
+    addTimetableRuntimeError('시간표 자동 갱신 실패', err.message || '알 수 없는 오류');
+  } finally {
+    state.timetableDataRefreshInFlight = false;
+    updateNextTrainWidget();
+  }
+}
+
 function syncTimetableUpdates() {
   if (state.timetableTimer) {
     clearInterval(state.timetableTimer);
     state.timetableTimer = null;
+  }
+  if (state.timetableDataRefreshTimer) {
+    clearInterval(state.timetableDataRefreshTimer);
+    state.timetableDataRefreshTimer = null;
   }
 
   if (isAutomaticWorkSuspended()) {
@@ -4988,6 +5243,8 @@ function syncTimetableUpdates() {
       }
       updateNextTrainWidget();
       state.timetableTimer = setInterval(updateNextTrainWidget, 30 * 1000);
+      refreshTimetableInBackground();
+      state.timetableDataRefreshTimer = setInterval(refreshTimetableInBackground, 6 * 60 * 60 * 1000);
     })
     .catch((err) => {
       addTimetableRuntimeError('시간표 캐시 로드 실패', err.message || '알 수 없는 오류');
@@ -5071,6 +5328,19 @@ function showStatusOverride(message) {
   state.statusOverrideTimer = setTimeout(updateStatusToast, 6000);
 }
 
+function showAppToast(message, { tone = 'success', duration = 3200 } = {}) {
+  if (!els.appToast) {
+    return;
+  }
+  clearTimeout(state.appToastTimer);
+  els.appToast.textContent = message;
+  els.appToast.dataset.tone = tone;
+  els.appToast.classList.remove('hidden');
+  state.appToastTimer = setTimeout(() => {
+    els.appToast.classList.add('hidden');
+  }, duration);
+}
+
 async function refreshTimetableManually() {
   if (!isSidebarWidgetVisible('trainSchedule')) {
     return;
@@ -5090,10 +5360,12 @@ async function refreshTimetableManually() {
     state.timetableCache = result.cache || state.timetableCache;
     if (result.ok) {
       state.timetableRefreshFailed = false;
+      els.nextTrainWidget?.classList.remove('widget-runtime-hidden');
       state.timetableRuntimeErrors = [];
       showStatusOverride(`시간표 갱신 (${formatHourMinute(new Date())})`);
     } else {
       state.timetableRefreshFailed = true;
+      els.nextTrainWidget?.classList.add('widget-runtime-hidden');
       addTimetableRuntimeError('시간표 갱신 요청 실패', result.error || '설정에서 오류 확인');
       showStatusOverride('시간표 갱신 실패 · 설정에서 오류 확인');
     }
@@ -5188,9 +5460,15 @@ function getMultiInfoPanes() {
   return getMultiWidgetSettings().enabledItems
     .map((itemId) => {
       if (itemId === 'solarTerm') {
+        if (!getSolarTermDisplayInfo()) {
+          return null;
+        }
         return { id: itemId, html: renderMultiSolarTermPane() };
       }
       if (itemId === 'dailyAdvice') {
+        if (!state.dailyAdviceData) {
+          return null;
+        }
         return { id: itemId, html: renderMultiDailyAdvicePane() };
       }
       return null;
@@ -5335,6 +5613,7 @@ function syncMultiInfoWidget() {
 
 function clearSolarTermWidget() {
   els.solarTermWidget?.classList.add('hidden');
+  els.solarTermWidget?.classList.add('widget-runtime-hidden');
 }
 
 function getCachedSolarTerms() {
@@ -5395,6 +5674,7 @@ function renderSolarTermWidget() {
     els.solarTermDescription.textContent = info.description;
   }
   els.solarTermWidget?.classList.remove('hidden');
+  els.solarTermWidget?.classList.remove('widget-runtime-hidden');
   return true;
 }
 
@@ -5479,8 +5759,14 @@ function syncSolarTermUpdates() {
   loadSolarTermWidget();
 }
 
-function clearDailyAdviceWidget() {
+function clearDailyAdviceWidget({ clearData = false } = {}) {
+  if (clearData) {
+    state.dailyAdviceData = null;
+  }
   els.dailyAdviceWidget?.classList.add('hidden');
+  if (clearData) {
+    els.dailyAdviceWidget?.classList.add('widget-runtime-hidden');
+  }
 }
 
 function dailyAdviceOverflows() {
@@ -5588,6 +5874,7 @@ function renderDailyAdviceWidget(advice = fallbackDailyAdvice) {
     els.dailyAdviceWidget.dataset.author = normalizedAdvice.author;
     els.dailyAdviceWidget.dataset.authorProfile = normalizedAdvice.authorProfile;
     els.dailyAdviceWidget.classList.remove('hidden');
+    els.dailyAdviceWidget.classList.remove('widget-runtime-hidden');
   }
   fitDailyAdviceLayout({ author: normalizedAdvice.author, authorProfile: normalizedAdvice.authorProfile });
   syncMultiInfoWidget();
@@ -5606,9 +5893,15 @@ async function loadDailyAdvice(forceRefresh = false) {
       syncMultiInfoWidget();
       return;
     }
-    renderDailyAdviceWidget(result?.advice || fallbackDailyAdvice);
+    if (result?.advice && (result.ok || result.fromCache)) {
+      renderDailyAdviceWidget(result.advice);
+    } else {
+      clearDailyAdviceWidget({ clearData: true });
+      syncMultiInfoWidget();
+    }
   } catch (_) {
-    renderDailyAdviceWidget(fallbackDailyAdvice);
+    clearDailyAdviceWidget({ clearData: true });
+    syncMultiInfoWidget();
   } finally {
     state.adviceLoading = false;
   }
@@ -5717,10 +6010,14 @@ async function updateWeather() {
   if (!isSidebarWidgetVisible('weather')) {
     return;
   }
+  if (state.weatherRequestInFlight) {
+    return;
+  }
 
   const station = getSelectedStationWeatherLocation();
   if (!station) {
     state.weatherLastUpdatedAt = null;
+    setWeatherWidgetLoadFailed(true);
     updateStatusToast();
     return;
   }
@@ -5729,9 +6026,16 @@ async function updateWeather() {
   const longitude = station.longitude;
   const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,apparent_temperature,weather_code&hourly=precipitation_probability&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FSeoul&forecast_days=1`;
   const airUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${latitude}&longitude=${longitude}&current=pm2_5,pm10&timezone=Asia%2FSeoul`;
+  const controller = new AbortController();
+  const timeoutTimer = setTimeout(() => controller.abort(), 15 * 1000);
+  state.weatherRequestInFlight = true;
 
   try {
-    const [forecastResponse, airResponse] = await Promise.all([fetch(forecastUrl), fetch(airUrl)]);
+    const requestOptions = { signal: controller.signal, cache: 'no-store' };
+    const [forecastResponse, airResponse] = await Promise.all([
+      fetch(forecastUrl, requestOptions),
+      fetch(airUrl, requestOptions)
+    ]);
     if (!forecastResponse.ok || !airResponse.ok) {
       throw new Error('Weather request failed');
     }
@@ -5747,6 +6051,15 @@ async function updateWeather() {
     const current = forecast.current || {};
     const daily = forecast.daily || {};
     const hourly = forecast.hourly || {};
+    const requiredNumbers = [
+      current.temperature_2m,
+      current.weather_code,
+      daily.temperature_2m_max?.[0],
+      daily.temperature_2m_min?.[0]
+    ].map(Number);
+    if (requiredNumbers.some((value) => !Number.isFinite(value))) {
+      throw new Error('Weather response is incomplete');
+    }
     const now = new Date();
     const hourlyIndex = (hourly.time || []).findIndex((time) => new Date(time).getHours() === now.getHours());
     const precip = hourlyIndex >= 0 ? hourly.precipitation_probability?.[hourlyIndex] : hourly.precipitation_probability?.[0];
@@ -5770,7 +6083,9 @@ async function updateWeather() {
     state.weatherLastUpdatedAt = null;
     setWeatherWidgetLoadFailed(true);
     updateStatusToast();
-    showStatusOverride('\uB0A0\uC528 \uAC31\uC2E0 \uC2E4\uD328');
+  } finally {
+    clearTimeout(timeoutTimer);
+    state.weatherRequestInFlight = false;
   }
 }
 
@@ -5893,6 +6208,7 @@ async function init() {
   const config = await window.desktopAPI.getConfig();
   state.savedConfig = deepClone(config);
   state.draftConfig = mergeUIState(state.savedConfig, config);
+  updateDirtyUi(false);
   if (els.toolbarTitle && state.appVersion) {
     els.toolbarTitle.textContent = `${KOREAN_APP_NAME} (v${state.appVersion})`;
   }
@@ -5904,6 +6220,14 @@ async function init() {
   if (typeof window.desktopAPI.onSmssPostSuccess === 'function') {
     window.desktopAPI.onSmssPostSuccess((status) => {
       updateSmssPostStatus(status);
+    });
+  }
+  if (typeof window.desktopAPI.onRuntimeResume === 'function') {
+    window.desktopAPI.onRuntimeResume(() => {
+      refreshNoticePublishState();
+      scheduleNoticePublishStateRefresh();
+      scheduleTrainInfoAutoRefresh();
+      updateBackgroundWidgetTasks({ forceWeather: true });
     });
   }
   if (typeof window.desktopAPI.getSmssPostStatus === 'function') {
@@ -5927,6 +6251,7 @@ async function init() {
 
   applyLayout();
   applySidebarWidth(state.draftConfig.sidebar?.width);
+  setWeatherWidgetLoadFailed(true);
   applyBrowserSettings();
   logSmssLayoutState('init');
   applySettingsToForm();
@@ -5944,6 +6269,15 @@ async function init() {
 
   state.currentIndex = 0;
   showSlide(0);
+  scheduleNoticePublishStateRefresh();
+
+  if (typeof window.desktopAPI.sendRuntimeHeartbeat === 'function') {
+    window.desktopAPI.sendRuntimeHeartbeat();
+    clearInterval(state.runtimeHeartbeatTimer);
+    state.runtimeHeartbeatTimer = setInterval(() => {
+      window.desktopAPI.sendRuntimeHeartbeat();
+    }, 15 * 1000);
+  }
 }
 
 init();

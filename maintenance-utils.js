@@ -7,6 +7,13 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   const DEFAULT_MAINTENANCE_SETTINGS = {
     autoUpdateEnabled: true,
+    updateTime: '00:30',
+    unavailableStartTime: '01:30',
+    unavailableEndTime: '04:30',
+    preparationMinutes: 10
+  };
+
+  const LEGACY_MAINTENANCE_SETTINGS = {
     updateTime: '01:00',
     unavailableStartTime: '02:00',
     unavailableEndTime: '04:30'
@@ -45,14 +52,32 @@
 
   function normalizeMaintenanceSettings(input) {
     const source = input && typeof input === 'object' ? input : {};
+    const usesLegacyDefaults = source.updateTime === LEGACY_MAINTENANCE_SETTINGS.updateTime
+      && source.unavailableStartTime === LEGACY_MAINTENANCE_SETTINGS.unavailableStartTime
+      && source.unavailableEndTime === LEGACY_MAINTENANCE_SETTINGS.unavailableEndTime
+      && !Object.prototype.hasOwnProperty.call(source, 'preparationMinutes');
+    const preparationMinutes = Number.parseInt(source.preparationMinutes, 10);
     return {
       autoUpdateEnabled: Object.prototype.hasOwnProperty.call(source, 'autoUpdateEnabled')
         ? !!source.autoUpdateEnabled
         : DEFAULT_MAINTENANCE_SETTINGS.autoUpdateEnabled,
-      updateTime: normalizeTime(source.updateTime, DEFAULT_MAINTENANCE_SETTINGS.updateTime),
-      unavailableStartTime: normalizeTime(source.unavailableStartTime, DEFAULT_MAINTENANCE_SETTINGS.unavailableStartTime),
-      unavailableEndTime: normalizeTime(source.unavailableEndTime, DEFAULT_MAINTENANCE_SETTINGS.unavailableEndTime)
+      updateTime: usesLegacyDefaults
+        ? DEFAULT_MAINTENANCE_SETTINGS.updateTime
+        : normalizeTime(source.updateTime, DEFAULT_MAINTENANCE_SETTINGS.updateTime),
+      unavailableStartTime: usesLegacyDefaults
+        ? DEFAULT_MAINTENANCE_SETTINGS.unavailableStartTime
+        : normalizeTime(source.unavailableStartTime, DEFAULT_MAINTENANCE_SETTINGS.unavailableStartTime),
+      unavailableEndTime: normalizeTime(source.unavailableEndTime, DEFAULT_MAINTENANCE_SETTINGS.unavailableEndTime),
+      preparationMinutes: Number.isInteger(preparationMinutes)
+        ? Math.min(60, Math.max(0, preparationMinutes))
+        : DEFAULT_MAINTENANCE_SETTINGS.preparationMinutes
     };
+  }
+
+  function getAutomaticWorkPauseStartTime(settingsInput = {}) {
+    const settings = normalizeMaintenanceSettings(settingsInput);
+    const shutdownMinute = parseTimeToMinutes(settings.unavailableStartTime);
+    return minutesToTime(shutdownMinute - settings.preparationMinutes);
   }
 
   function isMinuteWithinWindow(minute, startMinute, endMinute) {
@@ -75,7 +100,7 @@
     const minute = getLocalMinuteOfDay(dateInput);
     return isMinuteWithinWindow(
       minute,
-      parseTimeToMinutes(settings.unavailableStartTime),
+      parseTimeToMinutes(getAutomaticWorkPauseStartTime(settings)),
       parseTimeToMinutes(settings.unavailableEndTime)
     );
   }
@@ -88,7 +113,7 @@
     }
     return isMinuteWithinWindow(
       minute,
-      parseTimeToMinutes(settings.unavailableStartTime),
+      parseTimeToMinutes(getAutomaticWorkPauseStartTime(settings)),
       parseTimeToMinutes(settings.unavailableEndTime)
     );
   }
@@ -121,7 +146,7 @@
 
   function getUnavailableWindowLabel(settingsInput = {}) {
     const settings = normalizeMaintenanceSettings(settingsInput);
-    return `${settings.unavailableStartTime}~${settings.unavailableEndTime}`;
+    return `${getAutomaticWorkPauseStartTime(settings)}~${settings.unavailableEndTime}`;
   }
 
   return {
@@ -130,6 +155,7 @@
     minutesToTime,
     normalizeTime,
     normalizeMaintenanceSettings,
+    getAutomaticWorkPauseStartTime,
     isWithinUnavailableWindow,
     isTimeWithinUnavailableWindow,
     getDelayUntilNextDailyTime,

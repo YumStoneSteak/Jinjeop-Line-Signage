@@ -1,11 +1,13 @@
 {
   "name": "jinjeop-line-signage",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "진접선 행선안내 사이니지 Electron app",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "verify:maintenance": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-maintenance.js",
+    "verify:reliability": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-reliability.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-drag.js",
+    "verify:smss-drag": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-drag.js",
     "build": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js",
     "build:nsis": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js"
   },
@@ -48,6 +50,15 @@
       {
         "from": "files",
         "to": "files",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "extraResources": [
+      {
+        "from": "watchdog",
+        "to": "watchdog",
         "filter": [
           "**/*"
         ]

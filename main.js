@@ -1,10 +1,15 @@
-const { app, BrowserWindow, dialog, ipcMain, screen, session, shell } = require('electron');
-const { execFileSync } = require('child_process');
+const { app, BrowserWindow, dialog, ipcMain, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
+const { execFile, execFileSync } = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const path = require('path');
+const {
+  appendBoundedLogSync,
+  readJsonWithBackupSync,
+  writeJsonAtomicSync
+} = require('./durability-utils');
 const {
   DEFAULT_LOGO_RELATIVE_PATH,
   SIDEBAR_WIDGET_DEFAULTS_VERSION,
@@ -17,8 +22,13 @@ const {
   isWithinUnavailableWindow,
   isTimeWithinUnavailableWindow,
   getDelayUntilNextDailyTime,
+  getAutomaticWorkPauseStartTime,
   getUnavailableWindowLabel
 } = require('./maintenance-utils');
+const {
+  normalizeNoticeSchedule,
+  normalizePublishDate
+} = require('./notice-utils');
 
 let mainWindow;
 let popupWindows = [];
@@ -41,6 +51,19 @@ let maintenanceUpdateTimer = null;
 let installAfterDownload = false;
 let updateCheckInFlight = false;
 let updateState = null;
+let scheduledUpdateRetryIndex = 0;
+let lastUpdateCheckSource = null;
+let runtimeHeartbeatTimer = null;
+let rendererHeartbeatWatchdogTimer = null;
+let powerScheduleTimer = null;
+let lastRendererHeartbeatAt = null;
+let rendererRecoveryHistory = [];
+let gpuFailureHistory = [];
+let gpuSafeModeActive = false;
+let powerSaveBlockerId = null;
+let fatalRecoveryStarted = false;
+let watchdogRegistrationInFlight = false;
+let watchdogRegistrationPending = false;
 
 const SMSS_HOST = 'smss.seoulmetro.co.kr';
 const SMSS_WEBREQUEST_FILTER = { urls: [`*://${SMSS_HOST}/*`] };
@@ -55,6 +78,11 @@ const NOTICE_MEDIA_VIDEO_EXTENSIONS = new Set(['mp4', 'webm']);
 const KOREAN_APP_NAME = '진접선 행선안내 사이니지';
 const AUTO_START_VALUE_NAME = 'JinjeopLineSignage';
 const LEGACY_AUTO_START_VALUE_NAMES = ['NamyangjuDashboard'];
+const WATCHDOG_TASK_NAME = 'JinjeopLineSignageWatchdog';
+const RENDERER_HEARTBEAT_STALE_MS = 60 * 1000;
+const RENDERER_STARTUP_GRACE_MS = 90 * 1000;
+const RUNTIME_HEARTBEAT_INTERVAL_MS = 30 * 1000;
+const SCHEDULED_UPDATE_RETRY_DELAYS_MS = [10, 15, 15].map((minutes) => minutes * 60 * 1000);
 const smssDiagnosticContents = new Set();
 const smssConsoleForwardContents = new Set();
 const smokeTestMode = process.argv.includes('--smoke-test');
@@ -114,6 +142,16 @@ function safeConsoleError(...args) {
 }
 
 app.setName(DISPLAY_APP_NAME);
+if (smokeTestMode) {
+  app.setPath('userData', path.join(app.getPath('temp'), `JinjeopLineSignage-smoke-${process.pid}`));
+}
+try {
+  const gpuSafeMode = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'gpu-safe-mode.json'), 'utf-8'));
+  gpuSafeModeActive = Date.parse(gpuSafeMode?.until || '') > Date.now();
+  if (gpuSafeModeActive) {
+    app.disableHardwareAcceleration();
+  }
+} catch (_) {}
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_ID);
 }
@@ -212,7 +250,7 @@ function hasMissingUiConfig(config) {
 
 function hasMissingMaintenanceConfig(config) {
   const maintenanceConfig = config?.maintenance || {};
-  return ['autoUpdateEnabled', 'updateTime', 'unavailableStartTime', 'unavailableEndTime']
+  return ['autoUpdateEnabled', 'updateTime', 'unavailableStartTime', 'unavailableEndTime', 'preparationMinutes']
     .some((key) => !hasOwn(maintenanceConfig, key));
 }
 
@@ -265,8 +303,8 @@ function getSmssLogFilePath() {
   }
 
   const candidates = [
-    path.join(__dirname, 'logs', 'smss-diagnostics.log'),
-    path.join(app.getPath('userData'), 'logs', 'smss-diagnostics.log')
+    path.join(app.getPath('userData'), 'logs', 'smss-diagnostics.log'),
+    path.join(__dirname, 'logs', 'smss-diagnostics.log')
   ];
 
   for (const candidate of candidates) {
@@ -292,7 +330,14 @@ function writeSmssLogLine(line) {
     return;
   }
 
-  fs.appendFile(logFilePath, `${line}\n`, 'utf-8', () => {});
+  try {
+    appendBoundedLogSync(logFilePath, line, {
+      maxBytes: 5 * 1024 * 1024,
+      maxFiles: 5
+    });
+  } catch (_) {
+    smssLogFileUnavailable = true;
+  }
 }
 
 function logSmss(prefix, payload) {
@@ -644,12 +689,11 @@ function attachSmssViewDiagnostics(contents) {
     logSmssViewEvent(contents, 'render-process-gone', {
       details
     });
-  });
-
-  contents.on('crashed', (_event, killed) => {
-    logSmssViewEvent(contents, 'crashed', {
-      killed
-    });
+    setTimeout(() => {
+      if (!safeIsDestroyed(contents)) {
+        try { contents.reload(); } catch (_) {}
+      }
+    }, 500);
   });
 }
 
@@ -729,6 +773,143 @@ function deepClone(obj) {
 
 function getConfigPath() {
   return path.join(app.getPath('userData'), 'config.json');
+}
+
+function getRuntimeHealthPath() {
+  return path.join(app.getPath('userData'), 'runtime-health.json');
+}
+
+function getWatchdogPausePath() {
+  return path.join(app.getPath('userData'), 'watchdog-pause.json');
+}
+
+function writeRuntimeHeartbeat() {
+  try {
+    writeJsonAtomicSync(getRuntimeHealthPath(), {
+      version: 1,
+      appVersion: app.getVersion(),
+      processId: process.pid,
+      executablePath: process.execPath,
+      mainAliveAt: new Date().toISOString(),
+      rendererAliveAt: lastRendererHeartbeatAt ? new Date(lastRendererHeartbeatAt).toISOString() : null,
+      smssPostAliveAt: lastSmssSuccessAt ? new Date(lastSmssSuccessAt).toISOString() : null,
+      presentationMode,
+      gpuSafeModeActive,
+      smokeTestMode
+    }, { keepBackup: false });
+  } catch (err) {
+    safeConsoleError('Failed to write runtime heartbeat:', err);
+  }
+}
+
+function pauseExternalWatchdog(durationMs = 20 * 60 * 1000, reason = 'maintenance') {
+  try {
+    writeJsonAtomicSync(getWatchdogPausePath(), {
+      reason,
+      until: new Date(Date.now() + durationMs).toISOString()
+    }, { keepBackup: false });
+  } catch (err) {
+    safeConsoleError('Failed to pause external watchdog:', err);
+  }
+}
+
+function clearExternalWatchdogPause() {
+  const pausePath = getWatchdogPausePath();
+  try {
+    if (fs.existsSync(pausePath)) {
+      fs.unlinkSync(pausePath);
+    }
+  } catch (_) {}
+}
+
+function trimRendererRecoveryHistory(now = Date.now()) {
+  rendererRecoveryHistory = rendererRecoveryHistory.filter((at) => now - at < 5 * 60 * 1000);
+  return rendererRecoveryHistory;
+}
+
+function relaunchApplication(reason) {
+  if (fatalRecoveryStarted || smokeTestMode || isWithinUnavailableWindow(new Date(), getMaintenanceConfig())) {
+    return false;
+  }
+  fatalRecoveryStarted = true;
+  pauseExternalWatchdog(2 * 60 * 1000, reason);
+  logSmss('[RUNTIME]', { event: 'app-relaunch', reason });
+  app.relaunch({ args: process.argv.slice(1) });
+  setTimeout(() => app.exit(1), 250);
+  return true;
+}
+
+function recoverMainRenderer(reason = 'heartbeat-stale') {
+  if (!mainWindow || mainWindow.isDestroyed() || smokeTestMode) {
+    return false;
+  }
+  if (isWithinUnavailableWindow(new Date(), getMaintenanceConfig())) {
+    return false;
+  }
+
+  const now = Date.now();
+  const attempts = trimRendererRecoveryHistory(now);
+  rendererRecoveryHistory.push(now);
+  lastRendererHeartbeatAt = now;
+  logSmss('[RUNTIME]', {
+    event: 'renderer-recovery',
+    reason,
+    attempt: attempts.length + 1
+  });
+
+  if (attempts.length >= 2) {
+    return relaunchApplication(`renderer-${reason}`);
+  }
+
+  try {
+    if (attempts.length === 1) {
+      mainWindow.webContents.forcefullyCrashRenderer();
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.reload();
+        }
+      }, 100);
+      return true;
+    }
+    mainWindow.webContents.reloadIgnoringCache();
+    return true;
+  } catch (err) {
+    safeConsoleError('Renderer recovery failed:', err);
+    return relaunchApplication(`renderer-recovery-error-${reason}`);
+  }
+}
+
+function scheduleRuntimeHealthMonitoring() {
+  clearInterval(runtimeHeartbeatTimer);
+  clearInterval(rendererHeartbeatWatchdogTimer);
+  writeRuntimeHeartbeat();
+  runtimeHeartbeatTimer = setInterval(writeRuntimeHeartbeat, RUNTIME_HEARTBEAT_INTERVAL_MS);
+  runtimeHeartbeatTimer.unref?.();
+  const monitoringStartedAt = Date.now();
+  rendererHeartbeatWatchdogTimer = setInterval(() => {
+    if (!lastRendererHeartbeatAt) {
+      if (Date.now() - monitoringStartedAt > RENDERER_STARTUP_GRACE_MS) {
+        recoverMainRenderer('startup-timeout');
+      }
+      return;
+    }
+    if (Date.now() - lastRendererHeartbeatAt > RENDERER_HEARTBEAT_STALE_MS) {
+      recoverMainRenderer('heartbeat-stale');
+    }
+  }, 15 * 1000);
+  rendererHeartbeatWatchdogTimer.unref?.();
+}
+
+function syncPowerSaveBlocker() {
+  const shouldBlock = presentationMode && !isWithinUnavailableWindow(new Date(), getMaintenanceConfig());
+  if (shouldBlock && (powerSaveBlockerId === null || !powerSaveBlocker.isStarted(powerSaveBlockerId))) {
+    powerSaveBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+    return;
+  }
+  if (!shouldBlock && powerSaveBlockerId !== null) {
+    try { powerSaveBlocker.stop(powerSaveBlockerId); } catch (_) {}
+    powerSaveBlockerId = null;
+  }
 }
 
 function getNoticeMediaDir() {
@@ -900,6 +1081,33 @@ function preserveNoticeMediaInConfig(config) {
   };
 }
 
+function cleanupUnreferencedNoticeMedia(config) {
+  const noticeDir = getNoticeMediaDir();
+  if (!fs.existsSync(noticeDir)) {
+    return;
+  }
+  const referenced = new Set(
+    normalizePlaylist(config?.player?.playlist)
+      .map((item) => path.resolve(item.path || '').toLowerCase())
+      .filter(Boolean)
+  );
+  const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
+  for (const entry of fs.readdirSync(noticeDir, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const candidate = path.join(noticeDir, entry.name);
+    if (referenced.has(path.resolve(candidate).toLowerCase())) {
+      continue;
+    }
+    try {
+      if (fs.statSync(candidate).mtimeMs < cutoff) {
+        fs.unlinkSync(candidate);
+      }
+    } catch (_) {}
+  }
+}
+
 function getAppIconPath() {
   const staticIconPaths = [
     path.join(__dirname, APP_ICON_RELATIVE_PATH),
@@ -1002,10 +1210,8 @@ function normalizeDailyAdviceCache(cache) {
 function readDailyAdviceCache() {
   const cachePath = getDailyAdviceCachePath();
   try {
-    if (!fs.existsSync(cachePath)) {
-      return createEmptyDailyAdviceCache();
-    }
-    return normalizeDailyAdviceCache(JSON.parse(fs.readFileSync(cachePath, 'utf-8')));
+    const result = readJsonWithBackupSync(cachePath, createEmptyDailyAdviceCache);
+    return normalizeDailyAdviceCache(result.value);
   } catch (err) {
     return {
       ...createEmptyDailyAdviceCache(),
@@ -1016,7 +1222,7 @@ function readDailyAdviceCache() {
 
 function writeDailyAdviceCache(cache) {
   const normalized = normalizeDailyAdviceCache(cache);
-  fs.writeFileSync(getDailyAdviceCachePath(), JSON.stringify(normalized, null, 2), 'utf-8');
+  writeJsonAtomicSync(getDailyAdviceCachePath(), normalized);
   return normalized;
 }
 
@@ -1130,10 +1336,8 @@ function normalizeTimetableCache(cache) {
 function readTimetableCache() {
   const cachePath = getTimetableCachePath();
   try {
-    if (!fs.existsSync(cachePath)) {
-      return createEmptyTimetableCache();
-    }
-    return normalizeTimetableCache(JSON.parse(fs.readFileSync(cachePath, 'utf-8')));
+    const result = readJsonWithBackupSync(cachePath, createEmptyTimetableCache);
+    return normalizeTimetableCache(result.value);
   } catch (err) {
     const cache = createEmptyTimetableCache();
     return appendTimetableLog(cache, '시간표 JSON 파싱 실패', err.message);
@@ -1284,15 +1488,6 @@ function normalizeDragReplaySettings(input, splitRatio = defaultConfig.layout.sp
   };
 }
 
-function normalizePublishDate(value) {
-  const text = typeof value === 'string' ? value.trim() : '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    return '';
-  }
-  const date = new Date(`${text}T00:00:00`);
-  return Number.isNaN(date.getTime()) ? '' : text;
-}
-
 function normalizePlaylistItem(item) {
   if (!item || typeof item !== 'object') {
     return null;
@@ -1303,12 +1498,14 @@ function normalizePlaylistItem(item) {
     return null;
   }
 
+  const schedule = normalizeNoticeSchedule(item);
   return {
     path: pathValue,
     type: item.type === 'video' ? 'video' : 'image',
     duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
-    publishStartDate: normalizePublishDate(item.publishStartDate),
-    publishEndDate: normalizePublishDate(item.publishEndDate)
+    addedDate: schedule.addedDate,
+    publishStartDate: schedule.publishStartDate,
+    publishEndDate: schedule.publishEndDate
   };
 }
 
@@ -1447,7 +1644,7 @@ function attachBrowserZoomControls(contents) {
 
 function writeTimetableCache(cache) {
   const normalized = normalizeTimetableCache(cache);
-  fs.writeFileSync(getTimetableCachePath(), JSON.stringify(normalized, null, 2), 'utf-8');
+  writeJsonAtomicSync(getTimetableCachePath(), normalized);
   return normalized;
 }
 
@@ -1509,10 +1706,8 @@ function readSolarTermYearCache(yearInput) {
   const year = normalizeSolarTermYear(yearInput);
   const cachePath = getSolarTermCachePath(year);
   try {
-    if (!fs.existsSync(cachePath)) {
-      return null;
-    }
-    return normalizeSolarTermYearCache(JSON.parse(fs.readFileSync(cachePath, 'utf-8')), year);
+    const result = readJsonWithBackupSync(cachePath, () => null);
+    return result.value ? normalizeSolarTermYearCache(result.value, year) : null;
   } catch (err) {
     return {
       ...createEmptySolarTermYearCache(year),
@@ -1523,7 +1718,7 @@ function readSolarTermYearCache(yearInput) {
 
 function writeSolarTermYearCache(cache, yearInput) {
   const normalized = normalizeSolarTermYearCache(cache, yearInput);
-  fs.writeFileSync(getSolarTermCachePath(normalized.year), JSON.stringify(normalized, null, 2), 'utf-8');
+  writeJsonAtomicSync(getSolarTermCachePath(normalized.year), normalized);
   return normalized;
 }
 
@@ -1586,6 +1781,14 @@ function hasUnknownPlayerConfig(config) {
   }
   const allowedKeys = new Set(['transition', 'playlist']);
   return Object.keys(playerConfig).some((key) => !allowedKeys.has(key));
+}
+
+function hasMissingNoticeScheduleConfig(config) {
+  const playlist = Array.isArray(config?.player?.playlist) ? config.player.playlist : [];
+  return playlist.some((item) => (
+    !normalizePublishDate(item?.addedDate)
+    || !normalizePublishDate(item?.publishStartDate)
+  ));
 }
 
 function decodeHtmlEntities(text) {
@@ -1780,7 +1983,10 @@ function parseTimetableHtml(html, station) {
   };
 }
 
-function fetchText(url) {
+function fetchText(url, options = {}) {
+  const redirectCount = Number(options.redirectCount) || 0;
+  const maxRedirects = Number(options.maxRedirects) || 5;
+  const maxBytes = Number(options.maxBytes) || (5 * 1024 * 1024);
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https:') ? https : http;
     const request = client.get(url, {
@@ -1793,7 +1999,16 @@ function fetchText(url) {
     }, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
-        resolve(fetchText(new URL(response.headers.location, url).toString()));
+        if (redirectCount >= maxRedirects) {
+          reject(new Error('Too many redirects'));
+          return;
+        }
+        resolve(fetchText(new URL(response.headers.location, url).toString(), {
+          ...options,
+          redirectCount: redirectCount + 1,
+          maxRedirects,
+          maxBytes
+        }));
         return;
       }
 
@@ -1804,7 +2019,15 @@ function fetchText(url) {
       }
 
       const chunks = [];
-      response.on('data', (chunk) => chunks.push(chunk));
+      let receivedBytes = 0;
+      response.on('data', (chunk) => {
+        receivedBytes += chunk.length;
+        if (receivedBytes > maxBytes) {
+          request.destroy(new Error('Response exceeds size limit'));
+          return;
+        }
+        chunks.push(chunk);
+      });
       response.on('end', () => {
         const buffer = Buffer.concat(chunks);
         const contentType = response.headers['content-type'] || '';
@@ -1920,26 +2143,31 @@ function loadConfig() {
   const configPath = getConfigPath();
   try {
     if (!fs.existsSync(configPath)) {
-      fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2), 'utf-8');
+      writeJsonAtomicSync(configPath, defaultConfig, { keepBackup: false });
       persistedConfig = deepClone(defaultConfig);
       draftConfig = deepClone(defaultConfig);
       return;
     }
 
-    const raw = fs.readFileSync(configPath, 'utf-8');
-    const parsed = JSON.parse(raw);
+    const readResult = readJsonWithBackupSync(configPath, () => deepClone(defaultConfig));
+    const parsed = readResult.value;
+    if (readResult.error) {
+      safeConsoleError('Recovered config after read failure:', readResult.error);
+    }
     const preservedConfig = preserveNoticeMediaInConfig(mergeConfig(parsed));
     persistedConfig = preservedConfig.config;
     draftConfig = deepClone(persistedConfig);
     if (
       hasUnknownPlayerConfig(parsed)
+      || hasMissingNoticeScheduleConfig(parsed)
       || hasMissingLayoutConfig(parsed)
       || hasMissingStartupWindowConfig(parsed)
       || hasMissingUiConfig(parsed)
       || hasMissingMaintenanceConfig(parsed)
       || preservedConfig.changed
+      || readResult.source !== 'primary'
     ) {
-      fs.writeFileSync(configPath, JSON.stringify(persistedConfig, null, 2), 'utf-8');
+      writeJsonAtomicSync(configPath, persistedConfig);
     }
   } catch (err) {
     safeConsoleError('Failed to load config. Falling back to defaults:', err);
@@ -1951,11 +2179,13 @@ function loadConfig() {
 function writeConfig(config) {
   const configPath = getConfigPath();
   const merged = preserveNoticeMediaInConfig(mergeConfig(config || {})).config;
-  fs.writeFileSync(configPath, JSON.stringify(merged, null, 2), 'utf-8');
+  writeJsonAtomicSync(configPath, merged);
   persistedConfig = deepClone(merged);
   draftConfig = deepClone(merged);
   unsavedChanges = false;
   scheduleMaintenanceUpdateCheck();
+  ensureWatchdogTaskRegistration();
+  cleanupUnreferencedNoticeMedia(merged);
   return merged;
 }
 
@@ -2088,8 +2318,11 @@ function initializeAutoUpdater() {
   });
 
   autoUpdater.on('update-not-available', (info) => {
+    const wasScheduled = lastUpdateCheckSource === 'scheduled';
     updateCheckInFlight = false;
     installAfterDownload = false;
+    lastUpdateCheckSource = null;
+    scheduledUpdateRetryIndex = 0;
     setUpdateStatus({
       supported: true,
       state: 'not-available',
@@ -2098,6 +2331,9 @@ function initializeAutoUpdater() {
       progressPercent: null,
       error: null
     });
+    if (wasScheduled) {
+      scheduleMaintenanceUpdateCheck();
+    }
   });
 
   autoUpdater.on('update-downloaded', (info) => {
@@ -2113,15 +2349,29 @@ function initializeAutoUpdater() {
       error: null
     });
 
-    if (installAfterDownload) {
+    const scheduledInstallAllowed = lastUpdateCheckSource !== 'scheduled'
+      || new Date() < getAutomaticInstallCutoff();
+    if (installAfterDownload && scheduledInstallAllowed) {
       installAfterDownload = false;
+      lastUpdateCheckSource = null;
+      scheduledUpdateRetryIndex = 0;
       installDownloadedUpdate({ silent: true, forceRunAfter: true });
+    } else if (installAfterDownload) {
+      installAfterDownload = false;
+      lastUpdateCheckSource = null;
+      setUpdateStatus({
+        state: 'downloaded',
+        message: '종료 준비 시간과 가까워 다음 업데이트 시간까지 설치를 보류합니다.'
+      });
+      scheduleMaintenanceUpdateCheck();
     }
   });
 
   autoUpdater.on('error', (err) => {
+    const shouldRetryScheduled = lastUpdateCheckSource === 'scheduled';
     updateCheckInFlight = false;
     installAfterDownload = false;
+    lastUpdateCheckSource = null;
     setUpdateStatus({
       supported: true,
       state: 'error',
@@ -2129,6 +2379,9 @@ function initializeAutoUpdater() {
       progressPercent: null,
       error: err?.message || String(err)
     });
+    if (shouldRetryScheduled) {
+      scheduleScheduledUpdateRetry();
+    }
   });
 
   return setUpdateStatus({
@@ -2169,6 +2422,7 @@ async function checkForUpdates({ source = 'manual', installWhenDownloaded = fals
   }
 
   installAfterDownload = !!installWhenDownloaded;
+  lastUpdateCheckSource = source;
   try {
     await autoUpdater.checkForUpdates();
     return getUpdateStatus();
@@ -2200,6 +2454,7 @@ function installDownloadedUpdate({ silent = true, forceRunAfter = true } = {}) {
   });
   bypassClosePrompt = true;
   unsavedChanges = false;
+  pauseExternalWatchdog(20 * 60 * 1000, 'auto-update');
   setTimeout(() => {
     autoUpdater.quitAndInstall(silent, forceRunAfter);
   }, 300);
@@ -2208,8 +2463,17 @@ function installDownloadedUpdate({ silent = true, forceRunAfter = true } = {}) {
 
 function runScheduledUpdateCheck() {
   checkForUpdates({ source: 'scheduled', installWhenDownloaded: true })
-    .finally(() => {
-      scheduleMaintenanceUpdateCheck();
+    .then((status) => {
+      if (status?.state === 'error') {
+        scheduleScheduledUpdateRetry();
+        return;
+      }
+      if (['disabled', 'skipped', 'unsupported', 'invalid-schedule'].includes(status?.state)) {
+        scheduleMaintenanceUpdateCheck();
+      }
+    })
+    .catch(() => {
+      scheduleScheduledUpdateRetry();
     });
 }
 
@@ -2511,6 +2775,112 @@ function getStartupFolderPath() {
   return path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
 }
 
+function getAutomaticInstallCutoff(nowInput = new Date(), maintenanceInput = getMaintenanceConfig()) {
+  const now = new Date(nowInput);
+  const maintenance = normalizeMaintenanceConfig(maintenanceInput);
+  const [hour, minute] = maintenance.unavailableStartTime.split(':').map(Number);
+  const cutoff = new Date(now);
+  cutoff.setHours(hour, minute - 15, 0, 0);
+  if (cutoff <= now && !isWithinUnavailableWindow(now, maintenance)) {
+    cutoff.setDate(cutoff.getDate() + 1);
+  }
+  return cutoff;
+}
+
+function scheduleScheduledUpdateRetry() {
+  clearMaintenanceUpdateTimer();
+  const maintenance = getMaintenanceConfig();
+  const delay = SCHEDULED_UPDATE_RETRY_DELAYS_MS[scheduledUpdateRetryIndex];
+  if (!delay || isWithinUnavailableWindow(new Date(), maintenance)) {
+    scheduledUpdateRetryIndex = 0;
+    scheduleMaintenanceUpdateCheck();
+    return false;
+  }
+
+  const retryAt = new Date(Date.now() + delay);
+  if (retryAt >= getAutomaticInstallCutoff(new Date(), maintenance)) {
+    scheduledUpdateRetryIndex = 0;
+    scheduleMaintenanceUpdateCheck();
+    return false;
+  }
+
+  scheduledUpdateRetryIndex += 1;
+  setUpdateStatus({
+    state: 'retry-wait',
+    message: `자동 업데이트 재시도: ${retryAt.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`,
+    nextCheckAt: retryAt.toISOString()
+  });
+  maintenanceUpdateTimer = setTimeout(runScheduledUpdateCheck, delay);
+  maintenanceUpdateTimer.unref?.();
+  return true;
+}
+
+function getWatchdogResourcePath(filename) {
+  const basePath = app.isPackaged
+    ? path.join(process.resourcesPath, 'watchdog')
+    : path.join(__dirname, 'watchdog');
+  return path.join(basePath, filename);
+}
+
+function ensureWatchdogTaskRegistration() {
+  if (smokeTestMode || process.platform !== 'win32' || !app.isPackaged) {
+    return;
+  }
+
+  const enabled = !!persistedConfig?.window?.autoStart;
+  if (watchdogRegistrationInFlight) {
+    watchdogRegistrationPending = true;
+    return;
+  }
+
+  const registrationScript = getWatchdogResourcePath('register-watchdog.ps1');
+  const watchdogScript = getWatchdogResourcePath('watchdog.ps1');
+  if (!fs.existsSync(registrationScript)) {
+    logSmss('[WATCHDOG]', { event: 'registration-script-missing', registrationScript });
+    return;
+  }
+
+  const maintenance = getMaintenanceConfig();
+  const args = [
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', registrationScript,
+    '-TaskName', WATCHDOG_TASK_NAME
+  ];
+
+  if (enabled) {
+    args.push(
+      '-ExecutablePath', process.execPath,
+      '-WatchdogScriptPath', watchdogScript,
+      '-HeartbeatPath', getRuntimeHealthPath(),
+      '-PausePath', getWatchdogPausePath(),
+      '-QuietStart', getAutomaticWorkPauseStartTime(maintenance),
+      '-QuietEnd', maintenance.unavailableEndTime
+    );
+  } else {
+    args.push('-Disable');
+  }
+
+  watchdogRegistrationInFlight = true;
+  execFile('powershell.exe', args, {
+    windowsHide: true,
+    timeout: 15000,
+    encoding: 'utf8'
+  }, (err, stdout) => {
+    watchdogRegistrationInFlight = false;
+    logSmss('[WATCHDOG]', {
+      event: err ? 'registration-failed' : 'registration-complete',
+      enabled,
+      result: String(stdout || '').trim(),
+      error: err?.message || null
+    });
+    if (watchdogRegistrationPending || enabled !== !!persistedConfig?.window?.autoStart) {
+      watchdogRegistrationPending = false;
+      ensureWatchdogTaskRegistration();
+    }
+  });
+}
+
 async function openStartupFolder() {
   if (process.platform !== 'win32') {
     return {
@@ -2570,6 +2940,7 @@ function applyPresentationWindowMode() {
     mainWindow.setBounds(display.bounds);
     mainWindow.setAlwaysOnTop(!!persistedConfig?.window?.alwaysOnTop, 'screen-saver');
     mainWindow.webContents.send('window:fullscreenChanged', true);
+    syncPowerSaveBlocker();
     return;
   }
 
@@ -2578,6 +2949,7 @@ function applyPresentationWindowMode() {
   mainWindow.setSize(1600, 900);
   mainWindow.center();
   mainWindow.webContents.send('window:fullscreenChanged', false);
+  syncPowerSaveBlocker();
 }
 
 function createMainWindow() {
@@ -2585,7 +2957,8 @@ function createMainWindow() {
     preload: path.join(__dirname, 'preload.js'),
     contextIsolation: true,
     nodeIntegration: false,
-    webviewTag: true
+    webviewTag: true,
+    backgroundThrottling: false
   };
 
   mainWindow = new BrowserWindow({
@@ -2606,6 +2979,7 @@ function createMainWindow() {
   applyWindowOptions();
 
   mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, params) => {
+    webPreferences.backgroundThrottling = false;
     logBackgroundThrottling('webview', webPreferences, {
       src: params?.src || null,
       partition: params?.partition || null
@@ -2617,6 +2991,7 @@ function createMainWindow() {
   });
 
   mainWindow.webContents.on('did-attach-webview', (_event, webContents) => {
+    webContents.setBackgroundThrottling(false);
     attachPopupGuards(webContents);
     attachBrowserZoomControls(webContents);
     attachSmssViewDiagnostics(webContents);
@@ -2634,6 +3009,18 @@ function createMainWindow() {
         app.quit();
       }, smokeTestDurationMs);
     }
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+    recoverMainRenderer('unresponsive');
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logSmss('[RUNTIME]', {
+      event: 'main-render-process-gone',
+      details
+    });
+    setTimeout(() => recoverMainRenderer(`gone-${details?.reason || 'unknown'}`), 250);
   });
 
   mainWindow.on('minimize', (event) => {
@@ -2748,11 +3135,45 @@ app.on('web-contents-created', (_event, contents) => {
 app.whenReady().then(() => {
   loadConfig();
   presentationMode = !!persistedConfig?.window?.startFullscreen;
-  syncAutoStartSetting({ notifyOnFailure: true });
+  if (!smokeTestMode) {
+    syncAutoStartSetting({ notifyOnFailure: true });
+    ensureWatchdogTaskRegistration();
+  }
   initializeAutoUpdater();
   scheduleMaintenanceUpdateCheck();
   installSmssWebRequestWatchdog();
   createMainWindow();
+  scheduleRuntimeHealthMonitoring();
+  syncPowerSaveBlocker();
+  powerScheduleTimer = setInterval(syncPowerSaveBlocker, 60 * 1000);
+  powerScheduleTimer.unref?.();
+
+  powerMonitor.on('resume', () => {
+    scheduleMaintenanceUpdateCheck();
+    syncPowerSaveBlocker();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('runtime:resume');
+    }
+  });
+
+  app.on('child-process-gone', (_event, details) => {
+    logSmss('[RUNTIME]', { event: 'child-process-gone', details });
+    if (details?.type !== 'GPU' || !['crashed', 'oom', 'abnormal-exit'].includes(details?.reason)) {
+      return;
+    }
+    const now = Date.now();
+    gpuFailureHistory = gpuFailureHistory.filter((at) => now - at < 10 * 60 * 1000);
+    gpuFailureHistory.push(now);
+    if (gpuFailureHistory.length >= 3) {
+      try {
+        writeJsonAtomicSync(path.join(app.getPath('userData'), 'gpu-safe-mode.json'), {
+          reason: 'repeated-gpu-process-failure',
+          until: new Date(Date.now() + (7 * 24 * 60 * 60 * 1000)).toISOString()
+        }, { keepBackup: false });
+      } catch (_) {}
+      relaunchApplication('repeated-gpu-process-failure');
+    }
+  });
 
   screen.on('display-metrics-changed', () => {
     if (presentationMode) {
@@ -2775,6 +3196,13 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   clearMaintenanceUpdateTimer();
+  clearInterval(runtimeHeartbeatTimer);
+  clearInterval(rendererHeartbeatWatchdogTimer);
+  clearInterval(powerScheduleTimer);
+  if (powerSaveBlockerId !== null) {
+    try { powerSaveBlocker.stop(powerSaveBlockerId); } catch (_) {}
+    powerSaveBlockerId = null;
+  }
   if (smssWatchdogTimer) {
     clearInterval(smssWatchdogTimer);
     smssWatchdogTimer = null;
@@ -2806,6 +3234,35 @@ ipcMain.handle('updater:checkNow', () => checkForUpdates({ source: 'manual', ins
 ipcMain.handle('updater:installNow', () => installDownloadedUpdate({ silent: true, forceRunAfter: true }));
 
 ipcMain.handle('smss:getPostStatus', () => getSmssPostStatus());
+
+ipcMain.on('runtime:heartbeat', () => {
+  lastRendererHeartbeatAt = Date.now();
+  writeRuntimeHeartbeat();
+  clearExternalWatchdogPause();
+});
+
+process.on('unhandledRejection', (reason) => {
+  safeConsoleError('Unhandled promise rejection:', reason);
+  try {
+    logSmss('[RUNTIME]', {
+      event: 'unhandled-rejection',
+      error: reason?.stack || reason?.message || String(reason)
+    });
+  } catch (_) {}
+});
+
+process.on('uncaughtException', (err) => {
+  safeConsoleError('Uncaught exception:', err);
+  try {
+    logSmss('[RUNTIME]', {
+      event: 'uncaught-exception',
+      error: err?.stack || err?.message || String(err)
+    });
+  } catch (_) {}
+  if (!relaunchApplication('uncaught-exception')) {
+    setTimeout(() => app.exit(1), 250);
+  }
+});
 
 ipcMain.handle('config:save', (_, config) => {
   const saved = writeConfig(config);
@@ -2919,6 +3376,7 @@ ipcMain.handle('window:isFullscreen', () => {
 });
 
 ipcMain.handle('app:requestQuit', () => {
+  pauseExternalWatchdog(15 * 60 * 1000, 'intentional-quit');
   if (mainWindow) {
     mainWindow.close();
   }
