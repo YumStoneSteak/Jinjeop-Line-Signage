@@ -4,7 +4,15 @@
 
 ## 현재 버전
 
-v2.5.0
+v2.5.1
+
+## v2.5.1 주요 변경
+
+- 자동 새로고침의 화면 재로딩, 4호선 선택, 확대 2회, 드래그 보정을 하나의 직렬 작업으로 묶어 자동 실행끼리 겹치지 않도록 했습니다.
+- 느린 PC에서도 웹 화면과 공지 영역 레이아웃이 안정된 뒤 다음 단계로 넘어가며, 확대 버튼 호출이 아니라 실제 배율이 `1.000 → 1.125 → 1.250`으로 바뀌었는지 확인합니다.
+- 일시적인 로딩 지연이나 화면 전환으로 자동 새로고침이 실패하면 단계 내부 재시도 후 30초, 90초, 3분 간격으로 제한 재시도합니다.
+- 공지가 없어 공지 영역이 숨겨진 화면에서는 전용 드래그 보정값과 전체 너비를 기준으로 보정을 완료하며, 이 상태를 강제로 실행하는 패키지 검증을 추가했습니다.
+- NSIS 설치 파일명은 `Jinjeop.Line.Signage.v2.5.1.exe` 형식으로 생성됩니다.
 
 ## v2.5.0 주요 변경
 
@@ -68,7 +76,7 @@ v2.5.0
 GitHub Release에서 받은 설치 파일을 실행합니다.
 
 ```text
-Jinjeop.Line.Signage.v2.5.0.exe
+Jinjeop.Line.Signage.v2.5.1.exe
 ```
 
 설치 후 시작 메뉴 또는 바탕화면 바로가기로 실행합니다.
@@ -137,8 +145,8 @@ GitHub Release까지 배포:
 빌드 결과:
 
 ```text
-dist\Jinjeop.Line.Signage.v2.5.0.exe
-dist\Jinjeop.Line.Signage.v2.5.0.exe.blockmap
+dist\Jinjeop.Line.Signage.v2.5.1.exe
+dist\Jinjeop.Line.Signage.v2.5.1.exe.blockmap
 dist\latest.yml
 ```
 

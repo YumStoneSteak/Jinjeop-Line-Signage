@@ -19,6 +19,7 @@ const {
   normalizeNoticeSchedule,
   normalizePublishDate
 } = require('../notice-utils');
+const { createDefaultConfig } = require('../config-defaults');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jinjeop-reliability-'));
 try {
@@ -58,6 +59,15 @@ try {
   assert.equal(normalizePublishDate('2026-02-30'), '');
   assert.equal(getDelayUntilNextLocalDay(new Date(2026, 6, 12, 23, 59, 59, 0)), 2000);
 
+  const emptyNoticeConfig = createDefaultConfig();
+  assert.equal(emptyNoticeConfig.layout.hideNoticeWhenEmpty, true);
+  assert.deepEqual(emptyNoticeConfig.player.playlist, []);
+  assert.ok(emptyNoticeConfig.browser.dragReplay.profiles.noticeHidden.gesture);
+  assert.notDeepEqual(
+    emptyNoticeConfig.browser.dragReplay.profiles.noticeHidden.gesture,
+    emptyNoticeConfig.browser.dragReplay.profiles.noticeVisible.gesture
+  );
+
   const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
   assert.match(rendererSource, /smss-post-stale-screen-preserved/);
   assert.doesNotMatch(rendererSource, /function recoverSmssPostPolling/);
@@ -70,6 +80,17 @@ try {
   assert.match(rendererSource, /-webkit-user-select: none !important/);
   assert.match(rendererSource, /dragReplayInProgress/);
   assert.match(rendererSource, /smss-drag-replay-cleanup/);
+  assert.match(rendererSource, /line4RefreshPromise/);
+  assert.match(rendererSource, /line4RefreshInProgress/);
+  assert.match(rendererSource, /waitForLine4AutomationIdle/);
+  assert.match(rendererSource, /TRAIN_INFO_AUTO_REFRESH_RETRY_DELAYS_MS/);
+  assert.match(rendererSource, /line4-auto-refresh-retry-scheduled/);
+  assert.match(rendererSource, /line4-zoom-attempt/);
+  assert.match(rendererSource, /typeof currZoom === 'number'/);
+  assert.match(rendererSource, /waitForStableBrowserLayout/);
+  assert.match(rendererSource, /noticeMode: state\.noticePanelHidden \? 'hidden' : 'visible'/);
+  assert.match(rendererSource, /runLine4DisplaySequenceWithRetries/);
+  assert.match(rendererSource, /SMOKE AUTO REFRESH/);
   assert.match(rendererSource, /function updateDirtyUi\(dirty\)/);
   assert.match(rendererSource, /function showAppToast\(message/);
   assert.match(rendererSource, /btnSaveNoticeSettings/);
@@ -88,6 +109,12 @@ try {
 
   const dragUtilitySource = fs.readFileSync(path.join(__dirname, '..', 'smss-drag-utils.js'), 'utf8');
   assert.match(dragUtilitySource, /finally \{[\s\S]*?type: 'mouseUp'/);
+
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+  assert.match(mainSource, /--smoke-test-auto-refresh/);
+  assert.match(mainSource, /app:getSmokeTestOptions/);
+  assert.match(preloadSource, /getSmokeTestOptions/);
 
   for (const filename of ['watchdog.ps1', 'register-watchdog.ps1']) {
     const scriptPath = path.join(__dirname, '..', 'watchdog', filename);

@@ -86,6 +86,7 @@ const SCHEDULED_UPDATE_RETRY_DELAYS_MS = [10, 15, 15].map((minutes) => minutes *
 const smssDiagnosticContents = new Set();
 const smssConsoleForwardContents = new Set();
 const smokeTestMode = process.argv.includes('--smoke-test');
+const smokeTestAutoRefreshMode = smokeTestMode && process.argv.includes('--smoke-test-auto-refresh');
 const smokeTestDurationMs = smokeTestMode ? getSmokeTestDurationMs() : 1200;
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
@@ -3214,6 +3215,11 @@ ipcMain.handle('config:get', () => deepClone(persistedConfig || defaultConfig));
 ipcMain.handle('config:getDefaults', () => deepClone(defaultConfig));
 
 ipcMain.handle('app:getVersion', () => app.getVersion());
+
+ipcMain.handle('app:getSmokeTestOptions', () => ({
+  enabled: smokeTestMode,
+  autoRefresh: smokeTestAutoRefreshMode
+}));
 
 ipcMain.handle('app:getAutoStartStatus', () => getAutoStartStatus());
 

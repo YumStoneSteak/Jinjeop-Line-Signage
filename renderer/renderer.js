@@ -36,6 +36,15 @@ const SMSS_LOAD_TIMEOUT_MS = 18000;
 const LINE4_ACTIVATION_RETRY_LIMIT = 10;
 const LINE4_ACTIVATION_RETRY_DELAY_MS = 650;
 const LINE4_IN_PAGE_ZOOM_CLICKS = 2;
+const LINE4_PAGE_SETTLE_DELAY_MS = 1200;
+const LINE4_LAYOUT_STABLE_TIMEOUT_MS = 6000;
+const LINE4_ZOOM_CLICK_RETRY_LIMIT = 4;
+const LINE4_ZOOM_CLICK_RETRY_DELAY_MS = 500;
+const LINE4_ZOOM_CLICK_INTERVAL_MS = 700;
+const LINE4_SEQUENCE_RETRY_LIMIT = 3;
+const LINE4_SEQUENCE_RETRY_DELAY_MS = 1500;
+const LINE4_AUTOMATION_IDLE_TIMEOUT_MS = 30000;
+const TRAIN_INFO_AUTO_REFRESH_RETRY_DELAYS_MS = [30, 90, 180].map((seconds) => seconds * 1000);
 const SMSS_POST_WATCHDOG_INTERVAL_MS = 5000;
 const SMSS_POST_STALE_MS = 20000;
 const TIMETABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -134,12 +143,15 @@ const state = {
   pendingLine4ZoomInClicks: 0,
   line4SequenceInProgress: false,
   line4SequenceRunId: 0,
+  line4RefreshInProgress: false,
+  line4RefreshPromise: null,
   browserRequestedUrl: '',
   dragRecordInProgress: false,
   dragRecordRequestId: 0,
   dragRecordProfile: null,
   trainInfoAutoRefreshTimer: null,
   trainInfoAutoRefreshLastRunAt: null,
+  trainInfoAutoRefreshRetryAttempts: 0,
   stationSaveTrainInfoCorrectionTimer: null,
   smssLayoutFullscreenState: null,
   noticePanelHidden: false,
@@ -1996,7 +2008,7 @@ function clearTrainInfoAutoRefreshTimer() {
   }
 }
 
-function scheduleTrainInfoAutoRefresh() {
+function scheduleTrainInfoAutoRefresh(delayOverrideMs = null) {
   clearTrainInfoAutoRefreshTimer();
   const settings = getDraftTrainInfoAutoRefreshSettings();
   setDraftTrainInfoAutoRefreshSettings(settings);
@@ -2010,10 +2022,43 @@ function scheduleTrainInfoAutoRefresh() {
     return;
   }
 
-  const intervalMs = Math.max(1, settings.intervalHours) * 60 * 60 * 1000;
+  const intervalMs = Number.isFinite(delayOverrideMs) && delayOverrideMs > 0
+    ? delayOverrideMs
+    : Math.max(1, settings.intervalHours) * 60 * 60 * 1000;
   state.trainInfoAutoRefreshTimer = setTimeout(async () => {
     state.trainInfoAutoRefreshTimer = null;
-    await runTrainInfoAutoRefresh();
+    let completed = false;
+    try {
+      completed = await runTrainInfoAutoRefresh();
+    } catch (err) {
+      console.warn('Train info auto refresh failed:', err);
+    }
+
+    if (completed) {
+      state.trainInfoAutoRefreshRetryAttempts = 0;
+      scheduleTrainInfoAutoRefresh();
+      return;
+    }
+
+    if (isAutomaticWorkSuspended()) {
+      state.trainInfoAutoRefreshRetryAttempts = 0;
+      scheduleMaintenanceResume();
+      renderTrainInfoAutoRefreshStatus();
+      return;
+    }
+
+    const retryDelay = TRAIN_INFO_AUTO_REFRESH_RETRY_DELAYS_MS[state.trainInfoAutoRefreshRetryAttempts] || null;
+    if (retryDelay) {
+      state.trainInfoAutoRefreshRetryAttempts += 1;
+      logSmssLayoutState('line4-auto-refresh-retry-scheduled', {
+        retryAttempt: state.trainInfoAutoRefreshRetryAttempts,
+        retryDelayMs: retryDelay
+      });
+      scheduleTrainInfoAutoRefresh(retryDelay);
+      return;
+    }
+
+    state.trainInfoAutoRefreshRetryAttempts = 0;
     scheduleTrainInfoAutoRefresh();
   }, intervalMs);
 }
@@ -2360,6 +2405,42 @@ async function getWebviewViewportSize() {
   return null;
 }
 
+function getBrowserLayoutSignature() {
+  const rect = els.browserView?.getBoundingClientRect?.();
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  return {
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+    noticePanelHidden: state.noticePanelHidden
+  };
+}
+
+async function waitForStableBrowserLayout(timeoutMs = LINE4_LAYOUT_STABLE_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  let previousSignature = null;
+  let stableSamples = 0;
+  let latestSignature = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    latestSignature = getBrowserLayoutSignature();
+    const unchanged = latestSignature
+      && previousSignature
+      && latestSignature.width === previousSignature.width
+      && latestSignature.height === previousSignature.height
+      && latestSignature.noticePanelHidden === previousSignature.noticePanelHidden;
+    stableSamples = unchanged ? stableSamples + 1 : 0;
+    if (stableSamples >= 2) {
+      return { stable: true, signature: latestSignature };
+    }
+    previousSignature = latestSignature;
+    await delay(350);
+  }
+
+  return { stable: false, signature: latestSignature };
+}
+
 function gestureToViewportPoints(gesture, viewport) {
   const width = Math.max(2, Number(viewport?.width) || 2);
   const height = Math.max(2, Number(viewport?.height) || 2);
@@ -2542,6 +2623,51 @@ async function activateLine4InBrowser() {
   }
 }
 
+async function getSmssLine4PageState() {
+  if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
+    return null;
+  }
+
+  const script = `
+    (() => {
+      const selectedLine = document.querySelector('#searchLineNumCd, input[name="searchLineNumCd"]')?.value || '';
+      const zoomIn = document.querySelector('#zoomIn');
+      const trainMap = document.querySelector('#trainMap');
+      const currentZoom = typeof currZoom === 'number' ? currZoom : null;
+      const maximumZoom = typeof maxZoom === 'number' ? maxZoom : null;
+      return {
+        readyState: document.readyState,
+        selectedLine: String(selectedLine),
+        hasZoomIn: !!zoomIn,
+        hasTrainMap: !!trainMap,
+        currentZoom,
+        maximumZoom,
+        zoomInHidden: zoomIn ? getComputedStyle(zoomIn).display === 'none' : true,
+        zoomInDisabled: !!zoomIn?.classList?.contains('disabled')
+      };
+    })();
+  `;
+
+  try {
+    return await els.browserView.executeJavaScript(script, false);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function waitForSmssLine4PageReady(timeoutMs = SMSS_LOAD_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  let snapshot = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    snapshot = await getSmssLine4PageState();
+    if (snapshot?.selectedLine === '4' && snapshot.hasZoomIn && snapshot.hasTrainMap) {
+      return { ready: true, snapshot };
+    }
+    await delay(400);
+  }
+  return { ready: false, snapshot };
+}
+
 async function clickSmssZoomIn(times = 2) {
   if (!els.browserView || typeof els.browserView.executeJavaScript !== 'function') {
     return false;
@@ -2552,51 +2678,81 @@ async function clickSmssZoomIn(times = 2) {
     return true;
   }
 
-  const script = `
-    (() => new Promise((resolve) => {
-      const clickZoom = (attempt = 0) => {
-        const zoomIn = document.querySelector('#zoomIn');
-        if (!zoomIn) {
-          if (attempt < 12) {
-            setTimeout(() => clickZoom(attempt + 1), 150);
-            return;
-          }
-          resolve('missing');
-          return;
-        }
-
-        let count = 0;
-        const clickOnce = () => {
-          if (typeof zoomIn.click === 'function') {
-            zoomIn.click();
-          } else {
-            zoomIn.dispatchEvent(new MouseEvent('click', {
-              bubbles: true,
-              cancelable: true,
-              view: window
-            }));
-          }
-          count += 1;
-          if (count >= ${clickCount}) {
-            resolve('clicked');
-            return;
-          }
-          setTimeout(clickOnce, 180);
-        };
-
-        clickOnce();
+  const clickScript = `
+    (() => {
+      const zoomIn = document.querySelector('#zoomIn');
+      const before = typeof currZoom === 'number' ? currZoom : null;
+      const maximum = typeof maxZoom === 'number' ? maxZoom : null;
+      const atMaximumBefore = Number.isFinite(before) && Number.isFinite(maximum) && before >= maximum;
+      if (atMaximumBefore) {
+        return { status: 'maximum', before, after: before, maximum };
+      }
+      if (!zoomIn) {
+        return { status: 'missing', before, after: before, maximum };
+      }
+      const unavailable = zoomIn.classList.contains('disabled') || getComputedStyle(zoomIn).display === 'none';
+      if (unavailable) {
+        return { status: 'unavailable', before, after: before, maximum };
+      }
+      if (typeof zoomIn.click === 'function') {
+        zoomIn.click();
+      } else {
+        zoomIn.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          view: window
+        }));
+      }
+      const after = typeof currZoom === 'number' ? currZoom : null;
+      const changed = Number.isFinite(before) && Number.isFinite(after) ? after > before : true;
+      const atMaximumAfter = Number.isFinite(after) && Number.isFinite(maximum) && after >= maximum;
+      return {
+        status: changed || atMaximumAfter ? 'applied' : 'unchanged',
+        before,
+        after,
+        maximum,
+        atMaximumAfter
       };
-
-      clickZoom();
-    }))();
+    })();
   `;
 
-  try {
-    const result = await els.browserView.executeJavaScript(script, false);
-    return result === 'clicked';
-  } catch (_) {
-    return false;
+  let appliedClicks = 0;
+  for (let clickIndex = 1; clickIndex <= clickCount; clickIndex += 1) {
+    let applied = false;
+    for (let attempt = 1; attempt <= LINE4_ZOOM_CLICK_RETRY_LIMIT; attempt += 1) {
+      let result = null;
+      try {
+        result = await els.browserView.executeJavaScript(clickScript, false);
+      } catch (err) {
+        result = { status: 'execution-failed', error: err?.message || String(err) };
+      }
+      logSmssLayoutState('line4-zoom-attempt', {
+        clickIndex,
+        attempt,
+        result
+      });
+      if (result?.status === 'maximum') {
+        return true;
+      }
+      if (result?.status === 'applied') {
+        appliedClicks += 1;
+        applied = true;
+        break;
+      }
+      await delay(LINE4_ZOOM_CLICK_RETRY_DELAY_MS);
+    }
+    if (!applied) {
+      return false;
+    }
+    if (clickIndex < clickCount) {
+      await delay(LINE4_ZOOM_CLICK_INTERVAL_MS);
+    }
   }
+
+  const finalState = await getSmssLine4PageState();
+  logSmssLayoutState('line4-zoom-complete', { appliedClicks, finalState });
+  return appliedClicks === clickCount
+    && (!Number.isFinite(finalState?.maximumZoom) || finalState.currentZoom >= finalState.maximumZoom);
 }
 
 function isBrowserViewLoading() {
@@ -2795,7 +2951,44 @@ async function runLine4DisplaySequence(reason = 'manual') {
       return false;
     }
 
-    await delay(300);
+    const pageReadiness = await waitForSmssLine4PageReady();
+    if (!pageReadiness.ready) {
+      state.autoLine4Triggered = false;
+      logSmssLayoutState('line4-sequence-failed', {
+        reason,
+        stage: 'wait-line4-page-ready',
+        pageReadiness
+      });
+      return false;
+    }
+
+    const layoutReadiness = await waitForStableBrowserLayout();
+    if (!layoutReadiness.stable) {
+      state.autoLine4Triggered = false;
+      logSmssLayoutState('line4-sequence-failed', {
+        reason,
+        stage: 'wait-layout-stable',
+        layoutReadiness
+      });
+      return false;
+    }
+
+    await delay(LINE4_PAGE_SETTLE_DELAY_MS);
+    const settledLayoutSignature = getBrowserLayoutSignature();
+    const layoutChangedWhileSettling = !settledLayoutSignature
+      || settledLayoutSignature.width !== layoutReadiness.signature?.width
+      || settledLayoutSignature.height !== layoutReadiness.signature?.height
+      || settledLayoutSignature.noticePanelHidden !== layoutReadiness.signature?.noticePanelHidden;
+    if (layoutChangedWhileSettling) {
+      state.autoLine4Triggered = false;
+      logSmssLayoutState('line4-sequence-failed', {
+        reason,
+        stage: 'layout-changed-while-settling',
+        layoutReadiness,
+        settledLayoutSignature
+      });
+      return false;
+    }
     applyBrowserZoom();
 
     const zoomInClicks = state.pendingLine4ZoomInClicks || LINE4_IN_PAGE_ZOOM_CLICKS;
@@ -2804,12 +2997,12 @@ async function runLine4DisplaySequence(reason = 'manual') {
       ? await clickSmssZoomIn(zoomInClicks)
       : true;
 
-    await delay(250);
+    await delay(LINE4_ZOOM_CLICK_INTERVAL_MS);
     const dragSnapshot = await getDragReplayVerificationSnapshot();
     const dragApplied = dragSnapshot.enabled && dragSnapshot.hasGesture
       ? await replaySmssDragIfEnabled()
       : true;
-    clearSmssFocusArtifacts();
+    await clearSmssFocusArtifacts();
 
     const completed = activated && inPageZoomApplied && dragApplied;
     state.autoLine4Triggered = completed;
@@ -2820,7 +3013,10 @@ async function runLine4DisplaySequence(reason = 'manual') {
       inPageZoomClicks: zoomInClicks,
       inPageZoomApplied,
       dragApplied,
-      dragSnapshot
+      dragSnapshot,
+      pageReadiness,
+      layoutReadiness,
+      noticeMode: state.noticePanelHidden ? 'hidden' : 'visible'
     });
     return completed;
   } finally {
@@ -2830,27 +3026,92 @@ async function runLine4DisplaySequence(reason = 'manual') {
   }
 }
 
-async function refreshBrowserAndActivateLine4(reason = 'manual-refresh') {
-  if (!els.browserView || state.line4SequenceInProgress || state.dragReplayInProgress) {
-    logSmssLayoutState('line4-refresh-skipped', {
+async function runLine4DisplaySequenceWithRetries(reason, retryLimit = LINE4_SEQUENCE_RETRY_LIMIT) {
+  for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
+    let completed = false;
+    let error = null;
+    try {
+      completed = await runLine4DisplaySequence(reason);
+    } catch (err) {
+      error = err?.message || String(err);
+      console.warn('Line 4 display sequence failed:', err);
+    }
+    logSmssLayoutState('line4-sequence-result', {
       reason,
-      sequenceInProgress: state.line4SequenceInProgress,
-      dragReplayInProgress: state.dragReplayInProgress
+      attempt,
+      retryLimit,
+      completed,
+      error
     });
+    if (completed) {
+      return true;
+    }
+    if (attempt < retryLimit) {
+      await delay(LINE4_SEQUENCE_RETRY_DELAY_MS * attempt);
+    }
+  }
+  return false;
+}
+
+async function waitForLine4AutomationIdle(timeoutMs = LINE4_AUTOMATION_IDLE_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  while (state.line4SequenceInProgress || state.dragReplayInProgress) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      return false;
+    }
+    await delay(250);
+  }
+  return true;
+}
+
+async function refreshBrowserAndActivateLine4(reason = 'manual-refresh') {
+  if (!els.browserView) {
     return false;
   }
+  if (state.line4RefreshPromise) {
+    logSmssLayoutState('line4-refresh-joined', {
+      reason,
+      activeRefresh: true
+    });
+    return state.line4RefreshPromise;
+  }
 
-  const targetUrl = getLine4RefreshTargetUrl();
-  resetAutoLine4Activation(targetUrl);
-  state.browserRequestedUrl = targetUrl;
-  logSmssLayoutState('line4-refresh-request', { reason, url: targetUrl });
+  const operation = (async () => {
+    state.line4RefreshInProgress = true;
+    const idle = await waitForLine4AutomationIdle();
+    if (!idle) {
+      logSmssLayoutState('line4-refresh-deferred-timeout', {
+        reason,
+        sequenceInProgress: state.line4SequenceInProgress,
+        dragReplayInProgress: state.dragReplayInProgress
+      });
+      return false;
+    }
 
-  await navigateBrowserForLine4(targetUrl, { reloadIfCurrent: true });
-  return runLine4DisplaySequence(reason);
+    const targetUrl = getLine4RefreshTargetUrl();
+    resetAutoLine4Activation(targetUrl);
+    state.browserRequestedUrl = targetUrl;
+    logSmssLayoutState('line4-refresh-request', { reason, url: targetUrl });
+
+    const loadCompleted = await navigateBrowserForLine4(targetUrl, { reloadIfCurrent: true });
+    logSmssLayoutState('line4-refresh-navigation-result', { reason, url: targetUrl, loadCompleted });
+    await delay(LINE4_PAGE_SETTLE_DELAY_MS);
+    return runLine4DisplaySequenceWithRetries(reason);
+  })();
+
+  state.line4RefreshPromise = operation;
+  try {
+    return await operation;
+  } finally {
+    if (state.line4RefreshPromise === operation) {
+      state.line4RefreshPromise = null;
+    }
+    state.line4RefreshInProgress = false;
+  }
 }
 
 async function correctLine4AfterStationSave(reason = 'station-required-save') {
-  if (!els.browserView || state.autoLine4Triggered || state.line4SequenceInProgress || state.dragReplayInProgress) {
+  if (!els.browserView || state.autoLine4Triggered || state.line4RefreshInProgress || state.line4SequenceInProgress || state.dragReplayInProgress) {
     return false;
   }
 
@@ -2864,7 +3125,7 @@ async function correctLine4AfterStationSave(reason = 'station-required-save') {
   if (!isSeoulMetroTrainInfoUrl(currentUrl)) {
     await navigateBrowserForLine4(targetUrl, { reloadIfCurrent: false });
   }
-  return runLine4DisplaySequence(reason);
+  return runLine4DisplaySequenceWithRetries(reason);
 }
 
 function scheduleTrainInfoCorrectionAfterStationSave(reason = 'station-required-save') {
@@ -2877,7 +3138,7 @@ function scheduleTrainInfoCorrectionAfterStationSave(reason = 'station-required-
     if (state.autoLine4Triggered) {
       return;
     }
-    if (state.line4SequenceInProgress) {
+    if (state.line4RefreshInProgress || state.line4SequenceInProgress || state.dragReplayInProgress) {
       scheduleTrainInfoCorrectionAfterStationSave(reason);
       return;
     }
@@ -2888,13 +3149,23 @@ function scheduleTrainInfoCorrectionAfterStationSave(reason = 'station-required-
 }
 
 function scheduleAutoActivateLine4(delay = 700) {
-  if (!state.autoLine4TargetUrl || state.autoLine4Triggered || state.line4SequenceInProgress) {
+  if (!state.autoLine4TargetUrl || state.autoLine4Triggered) {
     return;
   }
 
   clearAutoLine4Timer();
   state.autoLine4Timer = setTimeout(async () => {
-    if (!state.autoLine4TargetUrl || state.autoLine4Triggered || state.line4SequenceInProgress) {
+    state.autoLine4Timer = null;
+    if (!state.autoLine4TargetUrl || state.autoLine4Triggered) {
+      return;
+    }
+    if (state.line4RefreshInProgress || state.line4SequenceInProgress || state.dragReplayInProgress) {
+      logSmssLayoutState('line4-auto-load-deferred', {
+        refreshInProgress: state.line4RefreshInProgress,
+        sequenceInProgress: state.line4SequenceInProgress,
+        dragReplayInProgress: state.dragReplayInProgress
+      });
+      scheduleAutoActivateLine4(1000);
       return;
     }
 
@@ -6277,6 +6548,20 @@ async function init() {
     state.runtimeHeartbeatTimer = setInterval(() => {
       window.desktopAPI.sendRuntimeHeartbeat();
     }, 15 * 1000);
+  }
+
+  if (typeof window.desktopAPI.getSmokeTestOptions === 'function') {
+    const smokeTestOptions = await window.desktopAPI.getSmokeTestOptions();
+    if (smokeTestOptions?.autoRefresh) {
+      setTimeout(async () => {
+        const completed = await refreshBrowserAndActivateLine4('smoke-auto-refresh');
+        console.log(`[SMOKE AUTO REFRESH] ${JSON.stringify({
+          completed,
+          noticeMode: state.noticePanelHidden ? 'hidden' : 'visible',
+          time: new Date().toISOString()
+        })}`);
+      }, 3500);
+    }
   }
 }
 
