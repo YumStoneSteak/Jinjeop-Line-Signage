@@ -63,4 +63,12 @@ Register-ScheduledTask `
   -Description 'Keeps Jinjeop Line Signage running during the unattended operating window.' `
   -Force | Out-Null
 
-Write-Output 'registered'
+Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+Start-ScheduledTask -TaskName $TaskName
+Start-Sleep -Milliseconds 500
+$taskState = (Get-ScheduledTask -TaskName $TaskName).State
+if ($taskState -ne 'Running') {
+  throw "Watchdog task did not start: $taskState"
+}
+
+Write-Output "registered:$taskState"

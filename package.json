@@ -1,20 +1,47 @@
 {
   "name": "jinjeop-line-signage",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "진접선 행선안내 사이니지 Electron app",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "verify:maintenance": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-maintenance.js",
-    "verify:reliability": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-reliability.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-drag.js",
+    "verify:durability": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-durability.js",
+    "verify:update-schedule": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-update-schedule.js",
+    "verify:watchdog": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-watchdog.js",
+    "verify:reliability": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-reliability.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-durability.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-update-schedule.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-watchdog.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-recovery.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-runtime-recovery.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-drag.js",
     "verify:smss-drag": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-drag.js",
-    "build": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js",
-    "build:nsis": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js"
+    "verify:package": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-package.js",
+    "build": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js && npm.cmd run verify:package",
+    "build:nsis": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js && npm.cmd run verify:package"
   },
   "build": {
     "appId": "kr.or.ncuc.jinjeop-line-signage",
     "productName": "Jinjeop Line Signage",
     "artifactName": "Jinjeop.Line.Signage.v${version}.${ext}",
+    "files": [
+      "package.json",
+      "main.js",
+      "preload.js",
+      "config-defaults.js",
+      "durability-utils.js",
+      "maintenance-utils.js",
+      "notice-utils.js",
+      "update-schedule-utils.js",
+      "settings-help.js",
+      "smss-drag-utils.js",
+      "smss-recovery-utils.js",
+      "runtime-recovery-utils.js",
+      "air-quality.js",
+      "renderer/index.html",
+      "renderer/renderer.js",
+      "renderer/styles.css",
+      "renderer/fonts/**/*",
+      "files/icons/ncuc.ico",
+      "files/icons/line4_down_icon.png",
+      "files/icons/line4_up_icon.png",
+      "files/logos/ncuc_logo.png"
+    ],
     "toolsets": {
       "winCodeSign": "1.1.0"
     },
@@ -73,8 +100,9 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^42.4.1",
-    "electron-builder": "^26.8.1"
+    "@electron/asar": "3.4.1",
+    "electron": "^42.9.0",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"

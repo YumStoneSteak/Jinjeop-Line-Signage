@@ -1,5 +1,13 @@
+@font-face {
+  font-family: 'SUIT Variable';
+  src: url('./fonts/SUIT-Variable.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 :root {
-  --font-ui: 'Pretendard', sans-serif;
+  --font-ui: 'SUIT Variable', 'SUIT', sans-serif;
   --bg: #f4f6f8;
   --panel: #ffffff;
   --toolbar: #f8f9fa;
@@ -58,6 +66,11 @@ body.fullscreen-active.ui-idle #slideCaption {
   pointer-events: none;
 }
 
+body.fullscreen-active.ui-idle,
+body.fullscreen-active.ui-idle * {
+  cursor: none !important;
+}
+
 #topHoverZone {
   position: fixed;
   top: 0;
@@ -76,7 +89,6 @@ body.fullscreen-active.ui-idle #slideCaption {
   display: none;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
   padding: 0 14px 14px;
   overflow: hidden;
   color: #ffffff;
@@ -87,6 +99,22 @@ body.fullscreen-active.ui-idle #slideCaption {
 
 body.fullscreen-active .fullscreen-sidebar {
   display: flex;
+}
+
+.sidebar-widget-stack {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  transform: scale(var(--sidebar-fit-scale, 1));
+  transform-origin: top center;
+}
+
+.sidebar-widget-stack > * {
+  flex-shrink: 0;
 }
 
 .sidebar-widget {
@@ -172,6 +200,14 @@ body.fullscreen-active .fullscreen-sidebar {
   font-family: var(--font-ui);
   min-width: 2.2em;
   text-align: right;
+}
+
+.sidebar-clock:has(.clock-hidden-leading-zero) {
+  transform: translateX(-0.5ch);
+}
+
+.sidebar-clock:has(.clock-hidden-leading-zero) .sidebar-clock-period {
+  transform: translateX(1ch);
 }
 
 .clock-unit {
@@ -780,7 +816,7 @@ textarea {
 
 .weather-life-section {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   flex: 0 0 auto;
   margin-top: auto;
   width: 100%;
@@ -794,6 +830,7 @@ textarea {
 .life-info-row {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
   min-height: 32px;
   text-align: left;
@@ -806,11 +843,11 @@ textarea {
 }
 
 .life-info-text {
-  display: flex;
+  display: grid;
+  grid-template-columns: 80px minmax(84px, max-content);
   align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  width: 100%;
+  column-gap: 8px;
+  width: auto;
   line-height: 1.1;
 }
 
@@ -827,6 +864,7 @@ textarea {
   font-weight: 900;
   line-height: 1.1;
   text-align: right;
+  white-space: nowrap;
 }
 
 .sidebar-logo-slot {

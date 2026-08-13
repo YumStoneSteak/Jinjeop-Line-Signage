@@ -48,6 +48,7 @@ const TRAIN_INFO_AUTO_REFRESH_RETRY_DELAYS_MS = [30, 90, 180].map((seconds) => s
 const SMSS_POST_WATCHDOG_INTERVAL_MS = 5000;
 const SMSS_POST_STALE_MS = 20000;
 const TIMETABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const DAILY_ADVICE_RETRY_MS = 15 * 60 * 1000;
 const DRAG_REPLAY_PROFILE_KEYS = ['noticeVisible', 'noticeHidden'];
 const DRAG_REPLAY_PROFILE_LABELS = {
   noticeVisible: '공지 영역 표시 중',
@@ -113,6 +114,9 @@ const state = {
   timetableTimer: null,
   timetableDataRefreshTimer: null,
   timetableDataRefreshInFlight: false,
+  timetableDataRefreshPromise: null,
+  timetableDataRefreshStationCode: '',
+  timetableSyncGeneration: 0,
   timetableRefreshFailed: false,
   timetableRuntimeErrors: [],
   solarTermYears: {},
@@ -125,8 +129,14 @@ const state = {
   dailyAdviceData: null,
   adviceTimer: null,
   adviceLoading: false,
+  adviceRetryNotBeforeAt: 0,
   weatherRequestInFlight: false,
+  weatherRequestGeneration: 0,
+  weatherAbortController: null,
+  weatherSyncStationCode: '',
+  weatherDataStationCode: '',
   weatherLastUpdatedAt: null,
+  weatherLastErrorAt: null,
   weatherLoadFailed: false,
   smssLastPostAt: null,
   smssPostStatus: null,
@@ -159,7 +169,10 @@ const state = {
   maintenanceStatusTimer: null,
   runtimeHeartbeatTimer: null,
   updateStatus: null,
-  stationRequirementActive: false
+  stationRequirementActive: false,
+  sidebarFitRaf: null,
+  sidebarFitMutationObserver: null,
+  sidebarFitResizeObserver: null
 };
 
 const els = {
@@ -169,6 +182,7 @@ const els = {
   appToast: document.getElementById('appToast'),
   topHoverZone: document.getElementById('topHoverZone'),
   fullscreenSidebar: document.getElementById('fullscreenSidebar'),
+  sidebarWidgetStack: document.getElementById('sidebarWidgetStack'),
   sidebarLogoImage: document.getElementById('sidebarLogoImage'),
   sidebarStationName: document.getElementById('sidebarStationName'),
   sidebarDate: document.getElementById('sidebarDate'),
@@ -3192,6 +3206,93 @@ function applySidebarWidth(width) {
   if (els.inputSidebarWidth) {
     els.inputSidebarWidth.value = safeWidth;
   }
+  scheduleSidebarFit();
+}
+
+function fitSidebarToViewport() {
+  const sidebar = els.fullscreenSidebar;
+  const stack = els.sidebarWidgetStack;
+  if (!sidebar || !stack) {
+    return;
+  }
+
+  stack.style.setProperty('--sidebar-fit-scale', '1');
+  stack.style.width = '100%';
+  stack.style.height = 'auto';
+
+  if (!document.body.classList.contains('fullscreen-active') || sidebar.clientHeight <= 0) {
+    stack.style.height = '100%';
+    sidebar.dataset.fitScale = '1';
+    sidebar.classList.remove('sidebar-fit-overflow');
+    return;
+  }
+
+  const sidebarStyle = getComputedStyle(sidebar);
+  const stackStyle = getComputedStyle(stack);
+  const availableHeight = Math.max(
+    1,
+    sidebar.clientHeight
+      - (Number.parseFloat(sidebarStyle.paddingTop) || 0)
+      - (Number.parseFloat(sidebarStyle.paddingBottom) || 0)
+  );
+  const visibleChildren = Array.from(stack.children).filter((element) => {
+    const style = getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  });
+  const gap = Number.parseFloat(stackStyle.rowGap || stackStyle.gap) || 0;
+  const requiredHeight = visibleChildren.reduce((total, element) => total + element.offsetHeight, 0)
+    + Math.max(0, visibleChildren.length - 1) * gap;
+  const naturalStackWidth = Math.max(1, stack.clientWidth);
+  const minimumLayoutWidth = 300;
+  const heightFit = requiredHeight > availableHeight ? availableHeight / requiredHeight : 1;
+  const widthFit = naturalStackWidth < minimumLayoutWidth ? naturalStackWidth / minimumLayoutWidth : 1;
+  const fitScale = Math.max(0.5, Math.min(1, heightFit, widthFit));
+
+  stack.style.width = `${100 / fitScale}%`;
+  stack.style.height = fitScale < 1 ? `${availableHeight / fitScale}px` : '100%';
+  stack.style.setProperty('--sidebar-fit-scale', fitScale.toFixed(4));
+  sidebar.dataset.fitScale = fitScale.toFixed(4);
+  sidebar.classList.toggle('sidebar-fit-overflow', requiredHeight * fitScale > availableHeight + 1);
+}
+
+function scheduleSidebarFit() {
+  if (state.sidebarFitRaf) {
+    cancelAnimationFrame(state.sidebarFitRaf);
+  }
+  state.sidebarFitRaf = requestAnimationFrame(() => {
+    state.sidebarFitRaf = null;
+    fitSidebarToViewport();
+  });
+}
+
+function bindSidebarFitMonitoring() {
+  if (!els.fullscreenSidebar || !els.sidebarWidgetStack) {
+    return;
+  }
+  state.sidebarFitResizeObserver?.disconnect();
+  state.sidebarFitMutationObserver?.disconnect();
+  if (typeof ResizeObserver === 'function') {
+    state.sidebarFitResizeObserver = new ResizeObserver(scheduleSidebarFit);
+    state.sidebarFitResizeObserver.observe(els.fullscreenSidebar);
+  }
+  if (typeof MutationObserver === 'function') {
+    state.sidebarFitMutationObserver = new MutationObserver((records) => {
+      if (records.some((record) => record.target !== els.sidebarWidgetStack)) {
+        scheduleSidebarFit();
+      }
+    });
+    state.sidebarFitMutationObserver.observe(els.sidebarWidgetStack, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true,
+      attributeFilter: ['class', 'src', 'style']
+    });
+  }
+  els.sidebarLogoImage?.addEventListener('load', scheduleSidebarFit);
+  els.sidebarLogoImage?.addEventListener('error', scheduleSidebarFit);
+  window.addEventListener('resize', scheduleSidebarFit);
+  scheduleSidebarFit();
 }
 
 function applySidebarLogo() {
@@ -3206,6 +3307,7 @@ function applySidebarLogo() {
   if (els.inputLogoPath) {
     els.inputLogoPath.value = logoPath;
   }
+  scheduleSidebarFit();
 }
 
 function updatePopupModeVisibility() {
@@ -3266,9 +3368,9 @@ function ensureSidebarWidgetStructure() {
     stationWidget.dataset.sidebarWidget = 'station';
     stationWidget.append(els.sidebarStationName);
     if (timeCard) {
-      els.fullscreenSidebar.insertBefore(stationWidget, timeCard);
+      (els.sidebarWidgetStack || timeCard.parentElement).insertBefore(stationWidget, timeCard);
     } else {
-      els.fullscreenSidebar.append(stationWidget);
+      (els.sidebarWidgetStack || els.fullscreenSidebar).append(stationWidget);
     }
   }
 }
@@ -3296,12 +3398,13 @@ function applySidebarWidgets() {
     }
     element.classList.toggle('widget-disabled', widget.visible === false);
     element.classList.toggle('widget-runtime-hidden', isSidebarWidgetRuntimeHidden(widget.id));
-    els.fullscreenSidebar.insertBefore(element, resizer || null);
+    (els.sidebarWidgetStack || els.fullscreenSidebar).append(element);
   });
 
   if (resizer) {
     els.fullscreenSidebar.append(resizer);
   }
+  scheduleSidebarFit();
 }
 
 function createSidebarWidgetCheckbox(widgetId, text) {
@@ -3678,6 +3781,7 @@ function applySettingsToForm() {
   }
   renderMaintenanceStatus();
   if (els.inputSidebarWidth) {
+    els.inputSidebarWidth.min = '300';
     els.inputSidebarWidth.value = clampSidebarWidth(state.draftConfig.sidebar?.width);
   }
   if (els.inputLogoPath) {
@@ -3806,7 +3910,7 @@ function clampSidebarWidth(width) {
   if (!Number.isFinite(numeric)) {
     return defaultConfig.sidebar.width;
   }
-  return Math.min(420, Math.max(220, Math.round(numeric)));
+  return Math.min(420, Math.max(300, Math.round(numeric)));
 }
 
 function isStationSelectedInConfig(config) {
@@ -4847,9 +4951,9 @@ function updateSidebarSettingsFromForm() {
   applySidebarWidgets();
   renderSidebarWidgetControls();
   if (stationChanged) {
-    state.weatherLastUpdatedAt = null;
+    invalidateWeatherForStationChange(station.stationCode);
   }
-  updateBackgroundWidgetTasks({ forceWeather: stationChanged });
+  updateBackgroundWidgetTasks();
   updateStationDisplayName();
   renderTimetableSettingsStatus();
   updateStationRequirementUi();
@@ -5021,6 +5125,9 @@ function updateToolbarVisibility() {
   if (!state.isFullscreen) {
     document.body.classList.remove('ui-idle');
     clearTimeout(state.uiIdleTimer);
+    state.uiIdleTimer = null;
+  } else {
+    markUserActive();
   }
   if (state.smssLayoutFullscreenState !== state.isFullscreen) {
     state.smssLayoutFullscreenState = state.isFullscreen;
@@ -5051,12 +5158,14 @@ function shouldHoldUiVisible() {
 function markUserActive() {
   document.body.classList.remove('ui-idle');
   clearTimeout(state.uiIdleTimer);
+  state.uiIdleTimer = null;
 
   if (!state.isFullscreen || shouldHoldUiVisible()) {
     return;
   }
 
   state.uiIdleTimer = setTimeout(() => {
+    state.uiIdleTimer = null;
     if (!shouldHoldUiVisible()) {
       document.body.classList.add('ui-idle');
     }
@@ -5450,8 +5559,8 @@ async function ensureTimetableCacheLoaded() {
   renderTimetableSettingsStatus();
 }
 
-async function refreshTimetableInBackground() {
-  if (state.timetableDataRefreshInFlight || isAutomaticWorkSuspended()) {
+async function refreshTimetableInBackground(syncGeneration = state.timetableSyncGeneration) {
+  if (isAutomaticWorkSuspended()) {
     return;
   }
   const settings = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable);
@@ -5459,26 +5568,68 @@ async function refreshTimetableInBackground() {
     return;
   }
 
-  state.timetableDataRefreshInFlight = true;
+  const requestStationCode = settings.stationCode;
+  let requestPromise = state.timetableDataRefreshPromise;
+  if (requestPromise && state.timetableDataRefreshStationCode !== requestStationCode) {
+    try {
+      await requestPromise;
+    } catch (_) {}
+    const currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+    if (syncGeneration !== state.timetableSyncGeneration
+      || currentStationCode !== requestStationCode
+      || isAutomaticWorkSuspended()
+      || !isSidebarWidgetVisible('trainSchedule')) {
+      return;
+    }
+    return refreshTimetableInBackground(syncGeneration);
+  }
+  if (!requestPromise || state.timetableDataRefreshStationCode !== requestStationCode) {
+    requestPromise = window.desktopAPI.refreshTimetable(settings);
+    state.timetableDataRefreshPromise = requestPromise;
+    state.timetableDataRefreshStationCode = requestStationCode;
+    state.timetableDataRefreshInFlight = true;
+  }
+
   try {
-    const result = await window.desktopAPI.refreshTimetable(settings);
+    const result = await requestPromise;
+    const currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+    if (syncGeneration !== state.timetableSyncGeneration || currentStationCode !== requestStationCode) {
+      return;
+    }
     state.timetableCache = result?.cache || state.timetableCache;
-    state.timetableRefreshFailed = !result?.ok;
+    const hasUsableCache = isTimetableCacheFresh(getSelectedStationCache());
+    state.timetableRefreshFailed = !result?.ok && !hasUsableCache;
     els.nextTrainWidget?.classList.toggle('widget-runtime-hidden', state.timetableRefreshFailed);
     if (result?.ok) {
       state.timetableRuntimeErrors = [];
+    } else {
+      addTimetableRuntimeError('시간표 자동 갱신 실패', result?.error || '기존 시간표를 사용합니다.');
     }
   } catch (err) {
-    state.timetableRefreshFailed = true;
-    els.nextTrainWidget?.classList.add('widget-runtime-hidden');
+    const currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+    if (syncGeneration !== state.timetableSyncGeneration || currentStationCode !== requestStationCode) {
+      return;
+    }
+    const hasUsableCache = isTimetableCacheFresh(getSelectedStationCache());
+    state.timetableRefreshFailed = !hasUsableCache;
+    els.nextTrainWidget?.classList.toggle('widget-runtime-hidden', state.timetableRefreshFailed);
     addTimetableRuntimeError('시간표 자동 갱신 실패', err.message || '알 수 없는 오류');
   } finally {
-    state.timetableDataRefreshInFlight = false;
-    updateNextTrainWidget();
+    if (state.timetableDataRefreshPromise === requestPromise) {
+      state.timetableDataRefreshPromise = null;
+      state.timetableDataRefreshStationCode = '';
+      state.timetableDataRefreshInFlight = false;
+    }
+    const currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+    if (syncGeneration === state.timetableSyncGeneration && currentStationCode === requestStationCode) {
+      updateNextTrainWidget();
+    }
   }
 }
 
 function syncTimetableUpdates() {
+  const syncGeneration = state.timetableSyncGeneration + 1;
+  state.timetableSyncGeneration = syncGeneration;
   if (state.timetableTimer) {
     clearInterval(state.timetableTimer);
     state.timetableTimer = null;
@@ -5506,18 +5657,34 @@ function syncTimetableUpdates() {
     return;
   }
 
+  const syncStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
   ensureTimetableCacheLoaded()
     .then(() => {
+      const currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+      if (syncGeneration !== state.timetableSyncGeneration || currentStationCode !== syncStationCode) {
+        return;
+      }
       if (!isSidebarWidgetVisible('trainSchedule')) {
         clearNextTrainWidget();
         return;
       }
       updateNextTrainWidget();
-      state.timetableTimer = setInterval(updateNextTrainWidget, 30 * 1000);
-      refreshTimetableInBackground();
-      state.timetableDataRefreshTimer = setInterval(refreshTimetableInBackground, 6 * 60 * 60 * 1000);
+      state.timetableTimer = setInterval(() => {
+        if (syncGeneration === state.timetableSyncGeneration) {
+          updateNextTrainWidget();
+        }
+      }, 30 * 1000);
+      refreshTimetableInBackground(syncGeneration);
+      state.timetableDataRefreshTimer = setInterval(() => {
+        if (syncGeneration === state.timetableSyncGeneration) {
+          refreshTimetableInBackground(syncGeneration);
+        }
+      }, 6 * 60 * 60 * 1000);
     })
     .catch((err) => {
+      if (syncGeneration !== state.timetableSyncGeneration) {
+        return;
+      }
       addTimetableRuntimeError('시간표 캐시 로드 실패', err.message || '알 수 없는 오류');
       clearNextTrainWidget();
       renderTimetableSettingsStatus();
@@ -5568,9 +5735,13 @@ function updateStatusToast() {
   }
 
   if (isSidebarWidgetShown('weather')) {
-    parts.push(state.weatherLastUpdatedAt
-      ? `날씨 갱신 (${formatHourMinute(state.weatherLastUpdatedAt)})`
-      : '날씨 갱신 대기 중');
+    if (state.weatherLastUpdatedAt && state.weatherLastErrorAt) {
+      parts.push(`날씨 갱신 실패 · ${formatHourMinute(state.weatherLastUpdatedAt)} 자료 표시 중`);
+    } else {
+      parts.push(state.weatherLastUpdatedAt
+        ? `날씨 갱신 (${formatHourMinute(state.weatherLastUpdatedAt)})`
+        : '날씨 갱신 대기 중');
+    }
   }
 
   if (state.smssLastPostAt) {
@@ -5623,26 +5794,67 @@ async function refreshTimetableManually() {
     return;
   }
   const originalText = els.btnRefreshTimetable.textContent;
+  const requestGeneration = state.timetableSyncGeneration;
+  const requestStationCode = settings.stationCode;
   els.btnRefreshTimetable.disabled = true;
   els.btnRefreshTimetable.textContent = '갱신 중...';
 
+  let requestPromise = null;
   try {
-    const result = await window.desktopAPI.refreshTimetable(settings);
-    state.timetableCache = result.cache || state.timetableCache;
-    if (result.ok) {
+    if (state.timetableDataRefreshPromise) {
+      try {
+        await state.timetableDataRefreshPromise;
+      } catch (_) {}
+    }
+    let currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+    if (requestGeneration !== state.timetableSyncGeneration || currentStationCode !== requestStationCode) {
+      return;
+    }
+    requestPromise = window.desktopAPI.refreshTimetable(settings);
+    state.timetableDataRefreshPromise = requestPromise;
+    state.timetableDataRefreshStationCode = requestStationCode;
+    state.timetableDataRefreshInFlight = true;
+    const result = await requestPromise;
+    currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+    if (requestGeneration !== state.timetableSyncGeneration || currentStationCode !== requestStationCode) {
+      return;
+    }
+    state.timetableCache = result?.cache || state.timetableCache;
+    const hasUsableCache = isTimetableCacheFresh(getSelectedStationCache());
+    if (result?.ok) {
       state.timetableRefreshFailed = false;
       els.nextTrainWidget?.classList.remove('widget-runtime-hidden');
       state.timetableRuntimeErrors = [];
       showStatusOverride(`시간표 갱신 (${formatHourMinute(new Date())})`);
     } else {
-      state.timetableRefreshFailed = true;
-      els.nextTrainWidget?.classList.add('widget-runtime-hidden');
-      addTimetableRuntimeError('시간표 갱신 요청 실패', result.error || '설정에서 오류 확인');
-      showStatusOverride('시간표 갱신 실패 · 설정에서 오류 확인');
+      state.timetableRefreshFailed = !hasUsableCache;
+      els.nextTrainWidget?.classList.toggle('widget-runtime-hidden', state.timetableRefreshFailed);
+      addTimetableRuntimeError('시간표 갱신 요청 실패', result?.error || '설정에서 오류 확인');
+      showStatusOverride(hasUsableCache
+        ? '시간표 갱신 실패 · 기존 시간표 표시 중'
+        : '시간표 갱신 실패 · 설정에서 오류 확인');
     }
     updateNextTrainWidget();
     renderTimetableSettingsStatus();
+  } catch (err) {
+    const currentStationCode = normalizeTimetableSettings(state.draftConfig?.sidebar?.timetable).stationCode;
+    if (requestGeneration === state.timetableSyncGeneration && currentStationCode === requestStationCode) {
+      const hasUsableCache = isTimetableCacheFresh(getSelectedStationCache());
+      state.timetableRefreshFailed = !hasUsableCache;
+      els.nextTrainWidget?.classList.toggle('widget-runtime-hidden', state.timetableRefreshFailed);
+      addTimetableRuntimeError('시간표 갱신 요청 실패', err.message || '알 수 없는 오류');
+      showStatusOverride(hasUsableCache
+        ? '시간표 갱신 실패 · 기존 시간표 표시 중'
+        : '시간표 갱신 실패 · 설정에서 오류 확인');
+      updateNextTrainWidget();
+      renderTimetableSettingsStatus();
+    }
   } finally {
+    if (requestPromise && state.timetableDataRefreshPromise === requestPromise) {
+      state.timetableDataRefreshPromise = null;
+      state.timetableDataRefreshStationCode = '';
+      state.timetableDataRefreshInFlight = false;
+    }
     els.btnRefreshTimetable.disabled = false;
     els.btnRefreshTimetable.textContent = originalText;
   }
@@ -6153,7 +6365,10 @@ function renderDailyAdviceWidget(advice = fallbackDailyAdvice) {
 
 async function loadDailyAdvice(forceRefresh = false) {
   if (state.adviceLoading || !shouldUseDailyAdviceData()) {
-    return;
+    return null;
+  }
+  if (!forceRefresh && state.adviceRetryNotBeforeAt > Date.now()) {
+    return null;
   }
 
   state.adviceLoading = true;
@@ -6162,17 +6377,29 @@ async function loadDailyAdvice(forceRefresh = false) {
     if (!shouldUseDailyAdviceData()) {
       clearDailyAdviceWidget();
       syncMultiInfoWidget();
-      return;
+      return null;
     }
     if (result?.advice && (result.ok || result.fromCache)) {
       renderDailyAdviceWidget(result.advice);
+      if (result.ok) {
+        state.adviceRetryNotBeforeAt = 0;
+        return true;
+      }
+      state.adviceRetryNotBeforeAt = Date.now() + DAILY_ADVICE_RETRY_MS;
+      return false;
     } else {
-      clearDailyAdviceWidget({ clearData: true });
-      syncMultiInfoWidget();
+      if (!state.dailyAdviceData && result?.advice?.message) {
+        renderDailyAdviceWidget(result.advice);
+      }
+      state.adviceRetryNotBeforeAt = Date.now() + DAILY_ADVICE_RETRY_MS;
+      return false;
     }
   } catch (_) {
-    clearDailyAdviceWidget({ clearData: true });
-    syncMultiInfoWidget();
+    if (!state.dailyAdviceData) {
+      renderDailyAdviceWidget(fallbackDailyAdvice);
+    }
+    state.adviceRetryNotBeforeAt = Date.now() + DAILY_ADVICE_RETRY_MS;
+    return false;
   } finally {
     state.adviceLoading = false;
   }
@@ -6187,7 +6414,7 @@ function getNextAdviceRefreshDelay(now = new Date()) {
   return Math.max(1000, next.getTime() - now.getTime());
 }
 
-function scheduleNextDailyAdviceRefresh() {
+function scheduleNextDailyAdviceRefresh(delayOverrideMs = null) {
   if (state.adviceTimer) {
     clearTimeout(state.adviceTimer);
     state.adviceTimer = null;
@@ -6202,11 +6429,18 @@ function scheduleNextDailyAdviceRefresh() {
     return;
   }
 
+  const retryDelayMs = Math.max(0, state.adviceRetryNotBeforeAt - Date.now());
+  const requestedDelayMs = Number.isFinite(delayOverrideMs) && delayOverrideMs > 0
+    ? delayOverrideMs
+    : null;
+  const delayMs = retryDelayMs > 0
+    ? Math.max(retryDelayMs, requestedDelayMs || 0)
+    : (requestedDelayMs || getNextAdviceRefreshDelay());
   state.adviceTimer = setTimeout(async () => {
     state.adviceTimer = null;
-    await loadDailyAdvice(true);
-    scheduleNextDailyAdviceRefresh();
-  }, getNextAdviceRefreshDelay());
+    const refreshed = await loadDailyAdvice(true);
+    scheduleNextDailyAdviceRefresh(refreshed === false ? DAILY_ADVICE_RETRY_MS : null);
+  }, delayMs);
 }
 
 function syncDailyAdviceUpdates() {
@@ -6229,7 +6463,11 @@ function syncDailyAdviceUpdates() {
     return;
   }
 
-  loadDailyAdvice(false);
+  loadDailyAdvice(false).then((refreshed) => {
+    if (refreshed === false && shouldUseDailyAdviceData()) {
+      scheduleNextDailyAdviceRefresh(DAILY_ADVICE_RETRY_MS);
+    }
+  });
   scheduleNextDailyAdviceRefresh();
 }
 
@@ -6272,6 +6510,22 @@ function applyTemperatureDisplayOrder(month = new Date().getMonth() + 1) {
   });
 }
 
+function invalidateWeatherForStationChange(stationCode = '') {
+  if (state.weatherTimer) {
+    clearInterval(state.weatherTimer);
+    state.weatherTimer = null;
+  }
+  state.weatherSyncStationCode = String(stationCode || '');
+  state.weatherRequestGeneration += 1;
+  state.weatherAbortController?.abort();
+  state.weatherAbortController = null;
+  state.weatherRequestInFlight = false;
+  state.weatherDataStationCode = '';
+  state.weatherLastUpdatedAt = null;
+  state.weatherLastErrorAt = null;
+  setWeatherWidgetLoadFailed(true);
+}
+
 async function updateWeather() {
   if (isAutomaticWorkSuspended()) {
     scheduleMaintenanceResume();
@@ -6297,25 +6551,38 @@ async function updateWeather() {
   const longitude = station.longitude;
   const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,apparent_temperature,weather_code&hourly=precipitation_probability&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FSeoul&forecast_days=1`;
   const airUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${latitude}&longitude=${longitude}&current=pm2_5,pm10&timezone=Asia%2FSeoul`;
+  const requestGeneration = state.weatherRequestGeneration + 1;
+  state.weatherRequestGeneration = requestGeneration;
   const controller = new AbortController();
+  state.weatherAbortController = controller;
   const timeoutTimer = setTimeout(() => controller.abort(), 15 * 1000);
   state.weatherRequestInFlight = true;
 
   try {
     const requestOptions = { signal: controller.signal, cache: 'no-store' };
-    const [forecastResponse, airResponse] = await Promise.all([
-      fetch(forecastUrl, requestOptions),
-      fetch(airUrl, requestOptions)
+    const [forecastResult, airResult] = await Promise.allSettled([
+      fetch(forecastUrl, requestOptions).then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Weather forecast request failed (${response.status})`);
+        }
+        return response.json();
+      }),
+      fetch(airUrl, requestOptions).then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Air quality request failed (${response.status})`);
+        }
+        return response.json();
+      })
     ]);
-    if (!forecastResponse.ok || !airResponse.ok) {
-      throw new Error('Weather request failed');
-    }
-    if (!isSidebarWidgetVisible('weather') || getSelectedStationWeatherLocation()?.stationCode !== requestStationCode) {
+    if (requestGeneration !== state.weatherRequestGeneration) {
       return;
     }
+    if (forecastResult.status !== 'fulfilled') {
+      throw forecastResult.reason || new Error('Weather forecast request failed');
+    }
 
-    const forecast = await forecastResponse.json();
-    const air = await airResponse.json();
+    const forecast = forecastResult.value;
+    const air = airResult.status === 'fulfilled' ? airResult.value : null;
     if (!isSidebarWidgetVisible('weather') || getSelectedStationWeatherLocation()?.stationCode !== requestStationCode) {
       return;
     }
@@ -6341,26 +6608,56 @@ async function updateWeather() {
 
     els.weatherIcon.innerHTML = getWeatherIcon(Number(current.weather_code));
     els.weatherTemp.textContent = `${Math.round(Number(current.temperature_2m))}\u00B0`;
-    renderAirQuality(air.current);
+    if (air?.current) {
+      renderAirQuality(air.current);
+    } else if (state.weatherDataStationCode !== requestStationCode) {
+      els.weatherAirQuality.textContent = '\uC815\uBCF4\uC5C6\uC74C';
+    }
     els.weatherHigh.textContent = `\uCD5C\uACE0 ${Math.round(Number(daily.temperature_2m_max?.[0]))}\u00B0`;
     els.weatherLow.textContent = `\uCD5C\uC800 ${Math.round(Number(daily.temperature_2m_min?.[0]))}\u00B0`;
     applyTemperatureDisplayOrder(now.getMonth() + 1);
+    const sunRowLabel = els.weatherSunTime.closest('.life-info-row')?.querySelector('.life-info-label');
+    if (sunRowLabel) {
+      sunRowLabel.textContent = sunLabel;
+    }
     els.weatherSunTime.textContent = formatHourMinute(sunValue);
     els.weatherPrecip.textContent = `${Number.isFinite(Number(precip)) ? Math.round(Number(precip)) : 0}%`;
+    state.weatherDataStationCode = requestStationCode;
     state.weatherLastUpdatedAt = new Date().toISOString();
+    state.weatherLastErrorAt = null;
     setWeatherWidgetLoadFailed(false);
     updateStatusToast();
   } catch (err) {
-    state.weatherLastUpdatedAt = null;
-    setWeatherWidgetLoadFailed(true);
+    if (requestGeneration !== state.weatherRequestGeneration) {
+      return;
+    }
+    state.weatherLastErrorAt = new Date().toISOString();
+    const hasSameStationData = state.weatherDataStationCode === requestStationCode
+      && !!state.weatherLastUpdatedAt;
+    if (!hasSameStationData) {
+      state.weatherDataStationCode = '';
+      state.weatherLastUpdatedAt = null;
+      setWeatherWidgetLoadFailed(true);
+    } else {
+      setWeatherWidgetLoadFailed(false);
+    }
     updateStatusToast();
   } finally {
     clearTimeout(timeoutTimer);
-    state.weatherRequestInFlight = false;
+    if (requestGeneration === state.weatherRequestGeneration) {
+      state.weatherRequestInFlight = false;
+      state.weatherAbortController = null;
+    }
   }
 }
 
 function syncWeatherUpdates(forceRefresh = false) {
+  const selectedStationCode = getSelectedStationWeatherLocation()?.stationCode || '';
+  const stationChanged = selectedStationCode !== state.weatherSyncStationCode;
+  if (stationChanged) {
+    invalidateWeatherForStationChange(selectedStationCode);
+  }
+
   if (isAutomaticWorkSuspended()) {
     if (state.weatherTimer) {
       clearInterval(state.weatherTimer);
@@ -6375,12 +6672,22 @@ function syncWeatherUpdates(forceRefresh = false) {
       clearInterval(state.weatherTimer);
       state.weatherTimer = null;
     }
+    state.weatherRequestGeneration += 1;
+    state.weatherAbortController?.abort();
+    state.weatherAbortController = null;
+    state.weatherRequestInFlight = false;
     return;
   }
 
-  if (forceRefresh && state.weatherTimer) {
-    clearInterval(state.weatherTimer);
-    state.weatherTimer = null;
+  if (forceRefresh && !stationChanged) {
+    if (state.weatherTimer) {
+      clearInterval(state.weatherTimer);
+      state.weatherTimer = null;
+    }
+    state.weatherRequestGeneration += 1;
+    state.weatherAbortController?.abort();
+    state.weatherAbortController = null;
+    state.weatherRequestInFlight = false;
   }
 
   if (state.weatherTimer) {
@@ -6512,6 +6819,7 @@ async function init() {
   bindSidebarSettingsForm();
   bindDividerDrag();
   bindSidebarResizer();
+  bindSidebarFitMonitoring();
   bindWebviewPopupHandling();
   bindFullscreenInteractions();
   bindActivityVisibility();
@@ -6554,12 +6862,24 @@ async function init() {
     const smokeTestOptions = await window.desktopAPI.getSmokeTestOptions();
     if (smokeTestOptions?.autoRefresh) {
       setTimeout(async () => {
-        const completed = await refreshBrowserAndActivateLine4('smoke-auto-refresh');
-        console.log(`[SMOKE AUTO REFRESH] ${JSON.stringify({
+        let completed = false;
+        let error = null;
+        try {
+          if (smokeTestOptions.forceAutoRefreshFailure) {
+            throw new Error('forced-auto-refresh-smoke-failure');
+          }
+          completed = await refreshBrowserAndActivateLine4('smoke-auto-refresh');
+        } catch (err) {
+          error = err?.message || String(err);
+        }
+        const result = {
           completed,
           noticeMode: state.noticePanelHidden ? 'hidden' : 'visible',
-          time: new Date().toISOString()
-        })}`);
+          time: new Date().toISOString(),
+          error
+        };
+        console.log(`[SMOKE AUTO REFRESH] ${JSON.stringify(result)}`);
+        window.desktopAPI.reportSmokeAutoRefreshResult?.(result);
       }, 3500);
     }
   }

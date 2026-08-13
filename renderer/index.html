@@ -11,6 +11,7 @@
     <div id="topHoverZone"></div>
 
     <aside id="fullscreenSidebar" class="fullscreen-sidebar" aria-label="사이니지 좌측 정보 영역">
+      <div id="sidebarWidgetStack" class="sidebar-widget-stack">
       <div class="sidebar-logo-slot">
         <img id="sidebarLogoImage" src="../files/logos/ncuc_logo.png" alt="Company Logo" onerror="this.style.display='none'" />
       </div>
@@ -101,6 +102,7 @@
           <svg viewBox="0 0 24 24"><path d="M12 10V2"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h20"/><path d="M5 18a7 7 0 0 1 14 0"/></svg>
         </span>
         <span id="weatherSunTime">일몰 --:--</span>
+      </div>
       </div>
 
       <div id="sidebarResizer" class="sidebar-resizer" title="사이드바 너비 조절"></div>
@@ -281,7 +283,7 @@
           </label>
 
           <label>좌측 바 너비(px)
-            <input id="inputSidebarWidth" type="number" min="220" max="420" step="5" />
+            <input id="inputSidebarWidth" type="number" min="300" max="420" step="5" />
           </label>
         </div>
 

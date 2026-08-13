@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   setDirty: (isDirty) => ipcRenderer.invoke('config:setDirty', isDirty),
   getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
   getSmokeTestOptions: () => ipcRenderer.invoke('app:getSmokeTestOptions'),
+  reportSmokeAutoRefreshResult: (result) => ipcRenderer.send('app:smokeAutoRefreshResult', result),
   getAutoStartStatus: () => ipcRenderer.invoke('app:getAutoStartStatus'),
   openStartupFolder: () => ipcRenderer.invoke('app:openStartupFolder'),
   openWindowsStartupSettings: () => ipcRenderer.invoke('app:openWindowsStartupSettings'),

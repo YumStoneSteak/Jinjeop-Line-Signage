@@ -13,6 +13,10 @@
 !macroend
 
 !macro customInit
+  ; Stop the unattended watchdog before replacing files so it cannot restart
+  ; the application in the middle of a manual installer upgrade.
+  nsExec::ExecToLog 'schtasks /End /TN "JinjeopLineSignageWatchdog"'
+  Pop $0
   ; Older releases used English executable names. v2.2.0 briefly used a Korean
   ; executable name, so close both forms before NSIS checks/replaces files.
   !insertmacro CloseIfRunning "Jinjeop Line Signage.exe"
@@ -26,5 +30,16 @@
   ; executable's default Electron icon in its shortcut cache.
   !insertmacro ApplyNcucShortcutIcon "$newDesktopLink"
   !insertmacro ApplyNcucShortcutIcon "$newStartMenuLink"
+  nsExec::ExecToLog 'schtasks /Run /TN "JinjeopLineSignageWatchdog"'
+  Pop $0
   System::Call 'Shell32::SHChangeNotify(i 0x8000000, i 0, i 0, i 0)'
+!macroend
+
+!macro customUnInstall
+  ; Remove the external watchdog with the application so it cannot keep polling
+  ; or try to launch an executable that no longer exists.
+  nsExec::ExecToLog 'schtasks /End /TN "JinjeopLineSignageWatchdog"'
+  Pop $0
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "JinjeopLineSignageWatchdog"'
+  Pop $0
 !macroend

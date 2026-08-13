@@ -70,7 +70,6 @@ try {
 
   const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
   assert.match(rendererSource, /smss-post-stale-screen-preserved/);
-  assert.doesNotMatch(rendererSource, /function recoverSmssPostPolling/);
   assert.match(rendererSource, /keep-current-web-screen-visible/);
   assert.doesNotMatch(rendererSource, /browserView\.classList\.(add|toggle)\([^\n]*(hidden|unavailable)/);
   assert.match(rendererSource, /scheduleNoticePublishStateRefresh\(\)/);
@@ -91,6 +90,9 @@ try {
   assert.match(rendererSource, /noticeMode: state\.noticePanelHidden \? 'hidden' : 'visible'/);
   assert.match(rendererSource, /runLine4DisplaySequenceWithRetries/);
   assert.match(rendererSource, /SMOKE AUTO REFRESH/);
+  assert.match(rendererSource, /reportSmokeAutoRefreshResult/);
+  assert.match(rendererSource, /function fitSidebarToViewport\(\)/);
+  assert.match(rendererSource, /minimumLayoutWidth = 300/);
   assert.match(rendererSource, /function updateDirtyUi\(dirty\)/);
   assert.match(rendererSource, /function showAppToast\(message/);
   assert.match(rendererSource, /btnSaveNoticeSettings/);
@@ -106,6 +108,18 @@ try {
   assert.doesNotMatch(rendererHtml, /\(v2\.2\.1\)/);
   assert.match(rendererStyles, /\.panel-action-bar\s*\{[\s\S]*?position: sticky/);
   assert.match(rendererStyles, /\.app-toast\s*\{/);
+  assert.match(rendererStyles, /@font-face\s*\{[\s\S]*?font-family:\s*'SUIT Variable'/);
+  assert.match(rendererStyles, /src:\s*url\('\.\/fonts\/SUIT-Variable\.woff2'\)\s*format\('woff2'\)/);
+  assert.match(rendererStyles, /font-weight:\s*100 900/);
+  assert.match(rendererStyles, /--font-ui:\s*'SUIT Variable',\s*'SUIT',\s*sans-serif/);
+  assert.doesNotMatch(rendererStyles, /Pretendard/);
+
+  const suitFontPath = path.join(__dirname, '..', 'renderer', 'fonts', 'SUIT-Variable.woff2');
+  const suitLicensePath = path.join(__dirname, '..', 'renderer', 'fonts', 'LICENSE-SUIT.txt');
+  assert.equal(fs.existsSync(suitFontPath), true);
+  assert.ok(fs.statSync(suitFontPath).size > 100_000);
+  assert.equal(fs.existsSync(suitLicensePath), true);
+  assert.match(fs.readFileSync(suitLicensePath, 'utf8'), /SIL OPEN FONT LICENSE Version 1\.1/);
 
   const dragUtilitySource = fs.readFileSync(path.join(__dirname, '..', 'smss-drag-utils.js'), 'utf8');
   assert.match(dragUtilitySource, /finally \{[\s\S]*?type: 'mouseUp'/);
@@ -113,8 +127,25 @@ try {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
   assert.match(mainSource, /--smoke-test-auto-refresh/);
+  assert.match(mainSource, /--smoke-test-force-auto-refresh-failure/);
   assert.match(mainSource, /app:getSmokeTestOptions/);
+  assert.match(mainSource, /\[FONT SMOKE\]/);
+  assert.match(mainSource, /app:smokeAutoRefreshResult/);
+  assert.match(mainSource, /waitForSmokeAutoRefreshResult/);
+  assert.match(mainSource, /document\.fonts\.load\('16px "SUIT Variable"'/);
+  assert.match(mainSource, /const PRESENTATION_CURSOR_IDLE_MS = 5000/);
+  assert.match(mainSource, /--smoke-test-cursor-auto-hide/);
+  assert.match(mainSource, /\[CURSOR SMOKE\]/);
+  assert.match(mainSource, /function syncPresentationCursorAutoHide\(\)/);
+  assert.match(mainSource, /PRESENTATION_CURSOR_HIDDEN_CSS/);
+  assert.match(mainSource, /registerPresentationCursorContents\(webContents\)/);
+  assert.match(mainSource, /screen\.getCursorScreenPoint\(\)/);
+  assert.match(mainSource, /function scheduleSmssGuestRecovery\(contents, reason/);
+  assert.match(mainSource, /function performSmssGuestRecovery\(contents, reason\)/);
+  assert.match(mainSource, /watchdogPauseProtectedUntilExit/);
+  assert.match(mainSource, /config-persistence-recovered/);
   assert.match(preloadSource, /getSmokeTestOptions/);
+  assert.match(preloadSource, /reportSmokeAutoRefreshResult/);
 
   for (const filename of ['watchdog.ps1', 'register-watchdog.ps1']) {
     const scriptPath = path.join(__dirname, '..', 'watchdog', filename);

@@ -103,6 +103,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo Running reliability verification...
+call npm.cmd run verify:reliability
+if errorlevel 1 (
+  echo [ERROR] Reliability verification failed.
+  pause
+  exit /b 1
+)
+
 echo Building installer...
 call npm.cmd run build
 if errorlevel 1 (

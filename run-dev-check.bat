@@ -42,6 +42,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo Running reliability verification...
+call npm.cmd run verify:reliability
+if errorlevel 1 (
+  echo [ERROR] Reliability verification failed.
+  pause
+  exit /b 1
+)
+
 echo Starting Jinjeop Line Signage in development mode...
 call npm.cmd start
 if errorlevel 1 (

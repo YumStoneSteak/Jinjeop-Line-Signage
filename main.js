@@ -21,14 +21,28 @@ const {
   normalizeMaintenanceSettings,
   isWithinUnavailableWindow,
   isTimeWithinUnavailableWindow,
-  getDelayUntilNextDailyTime,
   getAutomaticWorkPauseStartTime,
+  getDelayUntilUnavailableWindowEnds,
   getUnavailableWindowLabel
 } = require('./maintenance-utils');
 const {
   normalizeNoticeSchedule,
   normalizePublishDate
 } = require('./notice-utils');
+const {
+  getNextScheduledUpdate,
+  getScheduledRetryDecision,
+  getScheduledUpdateWindow
+} = require('./update-schedule-utils');
+const {
+  canRecoverSmssNow,
+  getSmssRecoveryDelay,
+  shouldRecoverSmssLoadFailure
+} = require('./smss-recovery-utils');
+const {
+  getRendererRecoveryAction,
+  shouldClearWatchdogPause
+} = require('./runtime-recovery-utils');
 
 let mainWindow;
 let popupWindows = [];
@@ -53,17 +67,37 @@ let updateCheckInFlight = false;
 let updateState = null;
 let scheduledUpdateRetryIndex = 0;
 let lastUpdateCheckSource = null;
+let scheduledInstallDeadlineAt = null;
+let scheduledAttemptFor = null;
+let scheduledUpdateDeadlineTimer = null;
+let updateScheduleState = null;
 let runtimeHeartbeatTimer = null;
 let rendererHeartbeatWatchdogTimer = null;
 let powerScheduleTimer = null;
 let lastRendererHeartbeatAt = null;
 let rendererRecoveryHistory = [];
+let expectedRendererCrashUntil = 0;
 let gpuFailureHistory = [];
 let gpuSafeModeActive = false;
 let powerSaveBlockerId = null;
 let fatalRecoveryStarted = false;
 let watchdogRegistrationInFlight = false;
 let watchdogRegistrationPending = false;
+let rendererWatchdogSuppressedUntil = 0;
+let watchdogRegistrationRetryTimer = null;
+let watchdogRegistrationRetryIndex = 0;
+let watchdogPauseProtectedUntilExit = false;
+let configPersistenceDegraded = false;
+let configRecoveryTimer = null;
+let configRecoveryRetryIndex = 0;
+let presentationCursorIdleTimer = null;
+let presentationCursorPollTimer = null;
+let presentationCursorHidden = false;
+let presentationCursorCssGeneration = 0;
+let lastPresentationCursorPoint = null;
+const presentationCursorContents = new Set();
+const presentationCursorCssKeys = new Map();
+const presentationCursorCssTasks = new Map();
 
 const SMSS_HOST = 'smss.seoulmetro.co.kr';
 const SMSS_WEBREQUEST_FILTER = { urls: [`*://${SMSS_HOST}/*`] };
@@ -82,12 +116,26 @@ const WATCHDOG_TASK_NAME = 'JinjeopLineSignageWatchdog';
 const RENDERER_HEARTBEAT_STALE_MS = 60 * 1000;
 const RENDERER_STARTUP_GRACE_MS = 90 * 1000;
 const RUNTIME_HEARTBEAT_INTERVAL_MS = 30 * 1000;
+const PRESENTATION_CURSOR_IDLE_MS = 5000;
+const PRESENTATION_CURSOR_POLL_MS = 100;
+const PRESENTATION_CURSOR_HIDDEN_CSS = 'html, body, * { cursor: none !important; }';
 const SCHEDULED_UPDATE_RETRY_DELAYS_MS = [10, 15, 15].map((minutes) => minutes * 60 * 1000);
+const WATCHDOG_REGISTRATION_RETRY_DELAYS_MS = [1, 5, 30].map((minutes) => minutes * 60 * 1000);
+const CONFIG_RECOVERY_RETRY_DELAYS_MS = [1000, 5000, 30000];
 const smssDiagnosticContents = new Set();
 const smssConsoleForwardContents = new Set();
+const smssRecoveryStates = new Map();
 const smokeTestMode = process.argv.includes('--smoke-test');
 const smokeTestAutoRefreshMode = smokeTestMode && process.argv.includes('--smoke-test-auto-refresh');
+const smokeTestForceAutoRefreshFailureMode = smokeTestAutoRefreshMode
+  && process.argv.includes('--smoke-test-force-auto-refresh-failure');
+const smokeTestCursorAutoHideMode = smokeTestMode && process.argv.includes('--smoke-test-cursor-auto-hide');
 const smokeTestDurationMs = smokeTestMode ? getSmokeTestDurationMs() : 1200;
+let smokeAutoRefreshResult = smokeTestAutoRefreshMode ? null : { completed: true, skipped: true };
+let resolveSmokeAutoRefreshResult = null;
+const smokeAutoRefreshResultPromise = smokeTestAutoRefreshMode
+  ? new Promise((resolve) => { resolveSmokeAutoRefreshResult = resolve; })
+  : Promise.resolve(smokeAutoRefreshResult);
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
 
@@ -96,9 +144,78 @@ function getSmokeTestDurationMs() {
   const rawDuration = durationArg ? durationArg.split('=').slice(1).join('=') : '';
   const durationMs = Number.parseInt(rawDuration, 10);
   if (!Number.isFinite(durationMs)) {
-    return 1200;
+    return smokeTestAutoRefreshMode ? 120000 : 1200;
   }
-  return Math.min(120000, Math.max(1200, durationMs));
+  const minimumDurationMs = smokeTestAutoRefreshMode ? 120000 : 1200;
+  return Math.min(120000, Math.max(minimumDurationMs, durationMs));
+}
+
+function waitForSmokeAutoRefreshResult() {
+  if (!smokeTestAutoRefreshMode) {
+    return Promise.resolve(smokeAutoRefreshResult);
+  }
+  return Promise.race([
+    smokeAutoRefreshResultPromise,
+    new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ completed: false, error: 'renderer-result-timeout' }), smokeTestDurationMs);
+      timer.unref?.();
+    })
+  ]);
+}
+
+function waitForDelay(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, delayMs)));
+}
+
+function cleanupOldSmokeDataDirectories() {
+  const tempRoot = path.resolve(app.getPath('temp'));
+  const prefix = 'JinjeopLineSignage-smoke-';
+  const cutoff = Date.now() - (6 * 60 * 60 * 1000);
+  try {
+    for (const entry of fs.readdirSync(tempRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) {
+        continue;
+      }
+      const target = path.resolve(tempRoot, entry.name);
+      if (!target.startsWith(`${tempRoot}${path.sep}`)) {
+        continue;
+      }
+      const stat = fs.statSync(target);
+      const pid = Number.parseInt(entry.name.slice(prefix.length), 10);
+      let processStillRunning = Number.isInteger(pid) && pid > 0;
+      if (processStillRunning) {
+        try {
+          process.kill(pid, 0);
+        } catch (_) {
+          processStillRunning = false;
+        }
+      }
+      if (!processStillRunning || stat.mtimeMs < cutoff) {
+        fs.rmSync(target, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+      }
+    }
+  } catch (err) {
+    safeConsoleError('Failed to clean old smoke-test data:', err);
+  }
+}
+
+function cleanupCurrentSmokeDataDirectory() {
+  if (!smokeTestMode) {
+    return;
+  }
+  const tempRoot = path.resolve(app.getPath('temp'));
+  const target = path.resolve(app.getPath('userData'));
+  if (
+    path.dirname(target) !== tempRoot
+    || !path.basename(target).startsWith('JinjeopLineSignage-smoke-')
+  ) {
+    return;
+  }
+  try {
+    fs.rmSync(target, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+  } catch (_) {
+    // A subsequent smoke run removes old isolated profiles after file handles close.
+  }
 }
 
 function isOutputPipeError(err) {
@@ -144,6 +261,7 @@ function safeConsoleError(...args) {
 
 app.setName(DISPLAY_APP_NAME);
 if (smokeTestMode) {
+  cleanupOldSmokeDataDirectories();
   app.setPath('userData', path.join(app.getPath('temp'), `JinjeopLineSignage-smoke-${process.pid}`));
 }
 try {
@@ -475,6 +593,14 @@ function readSmssDocumentState(contents) {
     });
   }
 
+  try {
+    if (contents.isLoading()) {
+      return Promise.resolve({ documentStateDeferred: 'loading' });
+    }
+  } catch (_) {
+    return Promise.resolve({ documentStateDeferred: 'unavailable' });
+  }
+
   return contents.executeJavaScript(`
     (() => ({
       href: location.href,
@@ -597,10 +723,10 @@ function attachSmssConsoleForwarding(contents, source) {
     smssConsoleForwardContents.delete(contents.id);
   });
 
-  contents.on('console-message', (_event, levelOrDetails, message, line, sourceId) => {
-    const details = typeof levelOrDetails === 'object' && levelOrDetails !== null
-      ? levelOrDetails
-      : { level: levelOrDetails, message, line, sourceId };
+  contents.on('console-message', (details) => {
+    if (!details || typeof details !== 'object') {
+      return;
+    }
     const text = String(details.message || '');
     if (!/^\[SMSS (VIEW|INPAGE|WEBREQUEST|WATCHDOG)\]/.test(text)) {
       return;
@@ -615,6 +741,110 @@ function attachSmssConsoleForwarding(contents, source) {
   });
 }
 
+function getSmssRecoveryState(contents) {
+  let state = smssRecoveryStates.get(contents.id);
+  if (!state) {
+    state = {
+      failureCount: 0,
+      recoveryTimer: null,
+      stableTimer: null,
+      unresponsiveTimer: null,
+      lastRecoveryAt: 0
+    };
+    smssRecoveryStates.set(contents.id, state);
+  }
+  return state;
+}
+
+function clearSmssRecoveryState(contents) {
+  const state = contents ? smssRecoveryStates.get(contents.id) : null;
+  if (!state) {
+    return;
+  }
+  clearTimeout(state.recoveryTimer);
+  clearTimeout(state.stableTimer);
+  clearTimeout(state.unresponsiveTimer);
+  smssRecoveryStates.delete(contents.id);
+}
+
+function isSmssRecoveryAllowed(contents) {
+  return canRecoverSmssNow({
+    destroyed: safeIsDestroyed(contents),
+    maintenance: isWithinUnavailableWindow(new Date(), getMaintenanceConfig()),
+    suppressedUntil: rendererWatchdogSuppressedUntil,
+    now: Date.now()
+  });
+}
+
+function performSmssGuestRecovery(contents, reason) {
+  if (!isSmssRecoveryAllowed(contents)) {
+    return false;
+  }
+  const state = getSmssRecoveryState(contents);
+  const now = Date.now();
+  if (now - state.lastRecoveryAt < 3000) {
+    return false;
+  }
+  state.lastRecoveryAt = now;
+  state.failureCount += 1;
+  logSmssViewEvent(contents, 'controlled-recovery', {
+    reason,
+    attempt: state.failureCount
+  });
+  try {
+    if (typeof contents.reloadIgnoringCache === 'function') {
+      contents.reloadIgnoringCache();
+    } else {
+      contents.reload();
+    }
+    return true;
+  } catch (err) {
+    logSmssViewEvent(contents, 'controlled-recovery-failed', {
+      reason,
+      error: err?.message || String(err)
+    });
+    return false;
+  }
+}
+
+function scheduleSmssGuestRecovery(contents, reason, delayOverride = null) {
+  const state = getSmssRecoveryState(contents);
+  if (state.recoveryTimer) {
+    return;
+  }
+  const delay = Number.isFinite(delayOverride)
+    ? Math.max(1000, delayOverride)
+    : getSmssRecoveryDelay(state.failureCount);
+  logSmssViewEvent(contents, 'controlled-recovery-scheduled', {
+    reason,
+    delayMs: delay,
+    attempt: state.failureCount + 1
+  });
+  state.recoveryTimer = setTimeout(() => {
+    state.recoveryTimer = null;
+    if (!performSmssGuestRecovery(contents, reason) && !safeIsDestroyed(contents)) {
+      const suppressionDelay = Math.max(0, rendererWatchdogSuppressedUntil - Date.now());
+      const maintenanceDelay = getDelayUntilUnavailableWindowEnds(new Date(), getMaintenanceConfig());
+      scheduleSmssGuestRecovery(
+        contents,
+        `${reason}-deferred`,
+        Math.max(60 * 1000, suppressionDelay, maintenanceDelay)
+      );
+    }
+  }, delay);
+  state.recoveryTimer.unref?.();
+}
+
+function scheduleSmssStableReset(contents) {
+  const state = getSmssRecoveryState(contents);
+  clearTimeout(state.stableTimer);
+  state.stableTimer = setTimeout(() => {
+    state.stableTimer = null;
+    state.failureCount = 0;
+  }, 2 * 60 * 1000);
+  state.stableTimer.unref?.();
+}
+
 function attachSmssViewDiagnostics(contents) {
   if (!contents || smssDiagnosticContents.has(contents.id)) {
     return;
@@ -623,6 +853,7 @@ function attachSmssViewDiagnostics(contents) {
   smssDiagnosticContents.add(contents.id);
   contents.once('destroyed', () => {
     smssDiagnosticContents.delete(contents.id);
+    clearSmssRecoveryState(contents);
   });
 
   attachSmssConsoleForwarding(contents, 'smss-webview');
@@ -631,6 +862,7 @@ function attachSmssViewDiagnostics(contents) {
   });
 
   contents.on('did-start-loading', () => {
+    clearTimeout(getSmssRecoveryState(contents).stableTimer);
     logSmssViewEvent(contents, 'did-start-loading');
   });
 
@@ -666,6 +898,9 @@ function attachSmssViewDiagnostics(contents) {
       frameProcessId,
       frameRoutingId
     });
+    if (shouldRecoverSmssLoadFailure({ errorCode, isMainFrame })) {
+      scheduleSmssGuestRecovery(contents, `did-fail-load-${errorCode}`);
+    }
   });
 
   contents.on('dom-ready', () => {
@@ -676,14 +911,30 @@ function attachSmssViewDiagnostics(contents) {
   contents.on('did-finish-load', () => {
     logSmssViewEvent(contents, 'did-finish-load');
     injectSmssInPageDiagnostics(contents);
+    const state = getSmssRecoveryState(contents);
+    clearTimeout(state.recoveryTimer);
+    state.recoveryTimer = null;
+    scheduleSmssStableReset(contents);
   });
 
   contents.on('unresponsive', () => {
     logSmssViewEvent(contents, 'unresponsive');
+    const state = getSmssRecoveryState(contents);
+    clearTimeout(state.unresponsiveTimer);
+    state.unresponsiveTimer = setTimeout(() => {
+      state.unresponsiveTimer = null;
+      if (!performSmssGuestRecovery(contents, 'unresponsive') && !safeIsDestroyed(contents)) {
+        scheduleSmssGuestRecovery(contents, 'unresponsive-deferred', 60 * 1000);
+      }
+    }, 10 * 1000);
+    state.unresponsiveTimer.unref?.();
   });
 
   contents.on('responsive', () => {
     logSmssViewEvent(contents, 'responsive');
+    const state = getSmssRecoveryState(contents);
+    clearTimeout(state.unresponsiveTimer);
+    state.unresponsiveTimer = null;
   });
 
   contents.on('render-process-gone', (_event, details) => {
@@ -691,8 +942,8 @@ function attachSmssViewDiagnostics(contents) {
       details
     });
     setTimeout(() => {
-      if (!safeIsDestroyed(contents)) {
-        try { contents.reload(); } catch (_) {}
+      if (!performSmssGuestRecovery(contents, 'render-process-gone') && !safeIsDestroyed(contents)) {
+        scheduleSmssGuestRecovery(contents, 'render-process-gone-deferred', 60 * 1000);
       }
     }, 500);
   });
@@ -803,12 +1054,16 @@ function writeRuntimeHeartbeat() {
   }
 }
 
-function pauseExternalWatchdog(durationMs = 20 * 60 * 1000, reason = 'maintenance') {
+function pauseExternalWatchdog(durationMs = 20 * 60 * 1000, reason = 'maintenance', protectUntilExit = false) {
   try {
     writeJsonAtomicSync(getWatchdogPausePath(), {
       reason,
+      ownerPid: process.pid,
       until: new Date(Date.now() + durationMs).toISOString()
     }, { keepBackup: false });
+    if (protectUntilExit) {
+      watchdogPauseProtectedUntilExit = true;
+    }
   } catch (err) {
     safeConsoleError('Failed to pause external watchdog:', err);
   }
@@ -823,6 +1078,11 @@ function clearExternalWatchdogPause() {
   } catch (_) {}
 }
 
+function cancelProtectedWatchdogPause() {
+  watchdogPauseProtectedUntilExit = false;
+  clearExternalWatchdogPause();
+}
+
 function trimRendererRecoveryHistory(now = Date.now()) {
   rendererRecoveryHistory = rendererRecoveryHistory.filter((at) => now - at < 5 * 60 * 1000);
   return rendererRecoveryHistory;
@@ -833,7 +1093,7 @@ function relaunchApplication(reason) {
     return false;
   }
   fatalRecoveryStarted = true;
-  pauseExternalWatchdog(2 * 60 * 1000, reason);
+  pauseExternalWatchdog(2 * 60 * 1000, reason, true);
   logSmss('[RUNTIME]', { event: 'app-relaunch', reason });
   app.relaunch({ args: process.argv.slice(1) });
   setTimeout(() => app.exit(1), 250);
@@ -849,21 +1109,26 @@ function recoverMainRenderer(reason = 'heartbeat-stale') {
   }
 
   const now = Date.now();
-  const attempts = trimRendererRecoveryHistory(now);
+  if (now < rendererWatchdogSuppressedUntil) {
+    return false;
+  }
+  const priorAttemptCount = trimRendererRecoveryHistory(now).length;
+  const recoveryAction = getRendererRecoveryAction(priorAttemptCount);
   rendererRecoveryHistory.push(now);
   lastRendererHeartbeatAt = now;
   logSmss('[RUNTIME]', {
     event: 'renderer-recovery',
     reason,
-    attempt: attempts.length + 1
+    attempt: priorAttemptCount + 1
   });
 
-  if (attempts.length >= 2) {
+  if (recoveryAction === 'relaunch') {
     return relaunchApplication(`renderer-${reason}`);
   }
 
   try {
-    if (attempts.length === 1) {
+    if (recoveryAction === 'crash-reload') {
+      expectedRendererCrashUntil = now + 5000;
       mainWindow.webContents.forcefullyCrashRenderer();
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -888,6 +1153,9 @@ function scheduleRuntimeHealthMonitoring() {
   runtimeHeartbeatTimer.unref?.();
   const monitoringStartedAt = Date.now();
   rendererHeartbeatWatchdogTimer = setInterval(() => {
+    if (Date.now() < rendererWatchdogSuppressedUntil) {
+      return;
+    }
     if (!lastRendererHeartbeatAt) {
       if (Date.now() - monitoringStartedAt > RENDERER_STARTUP_GRACE_MS) {
         recoverMainRenderer('startup-timeout');
@@ -2140,16 +2408,82 @@ async function getDailyAdvice(forceRefresh = false) {
   }
 }
 
+function configNeedsPersistence(parsed, preservedConfig, readResult) {
+  return hasUnknownPlayerConfig(parsed)
+    || hasMissingNoticeScheduleConfig(parsed)
+    || hasMissingLayoutConfig(parsed)
+    || hasMissingStartupWindowConfig(parsed)
+    || hasMissingUiConfig(parsed)
+    || hasMissingMaintenanceConfig(parsed)
+    || preservedConfig.changed
+    || readResult.source !== 'primary';
+}
+
+function clearConfigRecoveryTimer() {
+  if (configRecoveryTimer) {
+    clearTimeout(configRecoveryTimer);
+    configRecoveryTimer = null;
+  }
+}
+
+function scheduleConfigRecovery() {
+  if (!configPersistenceDegraded || configRecoveryTimer) {
+    return;
+  }
+  const delay = CONFIG_RECOVERY_RETRY_DELAYS_MS[
+    Math.min(configRecoveryRetryIndex, CONFIG_RECOVERY_RETRY_DELAYS_MS.length - 1)
+  ];
+  configRecoveryRetryIndex += 1;
+  configRecoveryTimer = setTimeout(() => {
+    configRecoveryTimer = null;
+    const configPath = getConfigPath();
+    try {
+      const readResult = readJsonWithBackupSync(configPath, () => deepClone(defaultConfig));
+      if (readResult.degraded) {
+        scheduleConfigRecovery();
+        return;
+      }
+      if (unsavedChanges) {
+        // Do not replace an in-progress operator edit. Recovery resumes after it is closed or reverted.
+        scheduleConfigRecovery();
+        return;
+      }
+
+      const parsed = readResult.value;
+      const preservedConfig = preserveNoticeMediaInConfig(mergeConfig(parsed));
+      persistedConfig = preservedConfig.config;
+      draftConfig = deepClone(persistedConfig);
+      if (configNeedsPersistence(parsed, preservedConfig, readResult)) {
+        writeJsonAtomicSync(configPath, persistedConfig);
+      }
+      configPersistenceDegraded = false;
+      configRecoveryRetryIndex = 0;
+      presentationMode = !!persistedConfig?.window?.startFullscreen;
+      syncAutoStartSetting({ notifyOnFailure: true });
+      ensureWatchdogTaskRegistration();
+      scheduleMaintenanceUpdateCheck();
+      applyWindowOptions();
+      syncPowerSaveBlocker();
+      logSmss('[RUNTIME]', {
+        event: 'config-persistence-recovered',
+        source: readResult.sourceDetail || readResult.source
+      });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        rendererWatchdogSuppressedUntil = Date.now() + RENDERER_STARTUP_GRACE_MS;
+        applyPresentationWindowMode();
+        mainWindow.webContents.reload();
+      }
+    } catch (err) {
+      safeConsoleError('Config recovery retry failed:', err);
+      scheduleConfigRecovery();
+    }
+  }, delay);
+  configRecoveryTimer.unref?.();
+}
+
 function loadConfig() {
   const configPath = getConfigPath();
   try {
-    if (!fs.existsSync(configPath)) {
-      writeJsonAtomicSync(configPath, defaultConfig, { keepBackup: false });
-      persistedConfig = deepClone(defaultConfig);
-      draftConfig = deepClone(defaultConfig);
-      return;
-    }
-
     const readResult = readJsonWithBackupSync(configPath, () => deepClone(defaultConfig));
     const parsed = readResult.value;
     if (readResult.error) {
@@ -2158,26 +2492,33 @@ function loadConfig() {
     const preservedConfig = preserveNoticeMediaInConfig(mergeConfig(parsed));
     persistedConfig = preservedConfig.config;
     draftConfig = deepClone(persistedConfig);
-    if (
-      hasUnknownPlayerConfig(parsed)
-      || hasMissingNoticeScheduleConfig(parsed)
-      || hasMissingLayoutConfig(parsed)
-      || hasMissingStartupWindowConfig(parsed)
-      || hasMissingUiConfig(parsed)
-      || hasMissingMaintenanceConfig(parsed)
-      || preservedConfig.changed
-      || readResult.source !== 'primary'
-    ) {
+    configPersistenceDegraded = !!readResult.degraded;
+    if (configPersistenceDegraded) {
+      logSmss('[RUNTIME]', {
+        event: 'config-persistence-degraded',
+        source: readResult.sourceDetail || readResult.source,
+        error: readResult.error?.message || null
+      });
+      scheduleConfigRecovery();
+      return;
+    }
+    configRecoveryRetryIndex = 0;
+    if (configNeedsPersistence(parsed, preservedConfig, readResult)) {
       writeJsonAtomicSync(configPath, persistedConfig);
     }
   } catch (err) {
-    safeConsoleError('Failed to load config. Falling back to defaults:', err);
+    safeConsoleError('Failed to load config. Using in-memory defaults until recovery:', err);
     persistedConfig = deepClone(defaultConfig);
     draftConfig = deepClone(defaultConfig);
+    configPersistenceDegraded = true;
+    scheduleConfigRecovery();
   }
 }
 
 function writeConfig(config) {
+  if (configPersistenceDegraded) {
+    throw new Error('설정 파일을 일시적으로 읽을 수 없어 저장을 보류합니다. 잠시 후 다시 시도해 주세요.');
+  }
   const configPath = getConfigPath();
   const merged = preserveNoticeMediaInConfig(mergeConfig(config || {})).config;
   writeJsonAtomicSync(configPath, merged);
@@ -2201,6 +2542,78 @@ function applyWindowOptions() {
 
 function getMaintenanceConfig() {
   return normalizeMaintenanceConfig(persistedConfig?.maintenance);
+}
+
+function getUpdateScheduleStatePath() {
+  return path.join(app.getPath('userData'), 'update-schedule-state.json');
+}
+
+function getUpdateScheduleState() {
+  if (updateScheduleState) {
+    return updateScheduleState;
+  }
+  const result = readJsonWithBackupSync(getUpdateScheduleStatePath(), () => ({
+    version: 1,
+    lastCompletedScheduledFor: null,
+    lastOutcome: null,
+    updatedAt: null
+  }));
+  updateScheduleState = result.value || {};
+  return updateScheduleState;
+}
+
+function recordScheduledUpdateCompletion(outcome) {
+  if (!scheduledAttemptFor) {
+    return;
+  }
+  updateScheduleState = {
+    version: 1,
+    lastCompletedScheduledFor: scheduledAttemptFor,
+    lastOutcome: outcome,
+    updatedAt: new Date().toISOString()
+  };
+  try {
+    writeJsonAtomicSync(getUpdateScheduleStatePath(), updateScheduleState);
+  } catch (err) {
+    safeConsoleError('Failed to persist update schedule state:', err);
+  }
+}
+
+function clearScheduledUpdateDeadlineTimer() {
+  if (scheduledUpdateDeadlineTimer) {
+    clearTimeout(scheduledUpdateDeadlineTimer);
+    scheduledUpdateDeadlineTimer = null;
+  }
+}
+
+function clearScheduledUpdateAttempt() {
+  clearScheduledUpdateDeadlineTimer();
+  scheduledInstallDeadlineAt = null;
+  scheduledAttemptFor = null;
+}
+
+function armScheduledUpdateDeadline(deadlineAt) {
+  clearScheduledUpdateDeadlineTimer();
+  const delay = Math.max(1000, deadlineAt - Date.now());
+  scheduledUpdateDeadlineTimer = setTimeout(() => {
+    scheduledUpdateDeadlineTimer = null;
+    if (lastUpdateCheckSource !== 'scheduled') {
+      return;
+    }
+    recordScheduledUpdateCompletion('deadline');
+    installAfterDownload = false;
+    // Keep the operation busy until electron-updater emits its terminal event;
+    // otherwise another check can overlap a download that is still winding down.
+    lastUpdateCheckSource = 'scheduled-expired';
+    clearScheduledUpdateAttempt();
+    setUpdateStatus({
+      state: 'deferred',
+      message: '자동 업데이트 안전 시간이 지나 다음 점검 시간까지 보류합니다.',
+      progressPercent: null
+    });
+    scheduleMaintenanceUpdateCheck();
+  }, delay);
+  scheduledUpdateDeadlineTimer.unref?.();
 }
 
 function getInitialUpdateState() {
@@ -2320,10 +2733,14 @@ function initializeAutoUpdater() {
 
   autoUpdater.on('update-not-available', (info) => {
     const wasScheduled = lastUpdateCheckSource === 'scheduled';
+    if (wasScheduled) {
+      recordScheduledUpdateCompletion('not-available');
+    }
     updateCheckInFlight = false;
     installAfterDownload = false;
     lastUpdateCheckSource = null;
     scheduledUpdateRetryIndex = 0;
+    clearScheduledUpdateAttempt();
     setUpdateStatus({
       supported: true,
       state: 'not-available',
@@ -2338,6 +2755,22 @@ function initializeAutoUpdater() {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
+    const wasScheduled = lastUpdateCheckSource === 'scheduled';
+    const currentMaintenance = getMaintenanceConfig();
+    const currentWindow = wasScheduled ? getScheduledUpdateWindow(new Date(), currentMaintenance) : null;
+    const scheduledInstallAllowed = !wasScheduled || (
+      currentMaintenance.autoUpdateEnabled
+      && !isWithinUnavailableWindow(new Date(), currentMaintenance)
+      && currentWindow?.hasSafeWindow
+      && currentWindow.isOpen
+      && currentWindow.scheduledFor.toISOString() === scheduledAttemptFor
+      && Number.isFinite(scheduledInstallDeadlineAt)
+      && currentWindow.installDeadline.getTime() === scheduledInstallDeadlineAt
+      && Date.now() < scheduledInstallDeadlineAt
+    );
+    if (wasScheduled) {
+      recordScheduledUpdateCompletion('downloaded');
+    }
     updateCheckInFlight = false;
     setUpdateStatus({
       supported: true,
@@ -2350,19 +2783,22 @@ function initializeAutoUpdater() {
       error: null
     });
 
-    const scheduledInstallAllowed = lastUpdateCheckSource !== 'scheduled'
-      || new Date() < getAutomaticInstallCutoff();
-    if (installAfterDownload && scheduledInstallAllowed) {
+    if (installAfterDownload && scheduledInstallAllowed && !unsavedChanges) {
       installAfterDownload = false;
       lastUpdateCheckSource = null;
       scheduledUpdateRetryIndex = 0;
+      clearScheduledUpdateAttempt();
       installDownloadedUpdate({ silent: true, forceRunAfter: true });
     } else if (installAfterDownload) {
       installAfterDownload = false;
       lastUpdateCheckSource = null;
+      const deferredForUnsavedChanges = unsavedChanges;
+      clearScheduledUpdateAttempt();
       setUpdateStatus({
         state: 'downloaded',
-        message: '종료 준비 시간과 가까워 다음 업데이트 시간까지 설치를 보류합니다.'
+        message: deferredForUnsavedChanges
+          ? '저장하지 않은 설정이 있어 자동 설치를 보류합니다.'
+          : '종료 준비 시간과 가까워 다음 업데이트 시간까지 설치를 보류합니다.'
       });
       scheduleMaintenanceUpdateCheck();
     }
@@ -2382,6 +2818,8 @@ function initializeAutoUpdater() {
     });
     if (shouldRetryScheduled) {
       scheduleScheduledUpdateRetry();
+    } else {
+      clearScheduledUpdateAttempt();
     }
   });
 
@@ -2397,6 +2835,7 @@ async function checkForUpdates({ source = 'manual', installWhenDownloaded = fals
   initializeAutoUpdater();
   const maintenance = getMaintenanceConfig();
   const scheduled = source === 'scheduled';
+  const scheduledWindow = scheduled ? getScheduledUpdateWindow(new Date(), maintenance) : null;
 
   if (scheduled && !maintenance.autoUpdateEnabled) {
     return setUpdateStatus({
@@ -2414,27 +2853,78 @@ async function checkForUpdates({ source = 'manual', installWhenDownloaded = fals
     });
   }
 
+  if (scheduled && !scheduledWindow.isOpen) {
+    scheduleMaintenanceUpdateCheck();
+    return setUpdateStatus({
+      state: scheduledWindow.hasSafeWindow ? 'deferred' : 'invalid-schedule',
+      message: scheduledWindow.hasSafeWindow
+        ? '자동 업데이트 안전 시간이 지나 다음 점검 시간까지 보류합니다.'
+        : '자동 업데이트 시간과 종료 준비 시간 사이에 안전한 설치 시간이 없습니다.',
+      error: scheduledWindow.hasSafeWindow ? null : 'No safe scheduled update window.'
+    });
+  }
+
   if (!isUpdaterSupported()) {
     return getUpdateStatus();
   }
 
   if (updateCheckInFlight) {
+    if (scheduled) {
+      const busyRetry = getScheduledRetryDecision(
+        new Date(),
+        scheduledWindow.installDeadline,
+        0,
+        [60 * 1000]
+      );
+      if (busyRetry.shouldRetry) {
+        clearMaintenanceUpdateTimer();
+        maintenanceUpdateTimer = setTimeout(runScheduledUpdateCheck, busyRetry.delayMs);
+        maintenanceUpdateTimer.unref?.();
+      } else {
+        updateScheduleState = {
+          ...getUpdateScheduleState(),
+          lastCompletedScheduledFor: scheduledWindow.scheduledFor.toISOString(),
+          lastOutcome: 'busy-deadline',
+          updatedAt: new Date().toISOString()
+        };
+        try { writeJsonAtomicSync(getUpdateScheduleStatePath(), updateScheduleState); } catch (_) {}
+        scheduleMaintenanceUpdateCheck();
+      }
+    }
     return getUpdateStatus();
   }
 
   installAfterDownload = !!installWhenDownloaded;
   lastUpdateCheckSource = source;
+  if (scheduled) {
+    scheduledAttemptFor = scheduledWindow.scheduledFor.toISOString();
+    scheduledInstallDeadlineAt = scheduledWindow.installDeadline.getTime();
+    armScheduledUpdateDeadline(scheduledInstallDeadlineAt);
+  }
   try {
     await autoUpdater.checkForUpdates();
     return getUpdateStatus();
   } catch (err) {
+    const shouldRetryScheduled = lastUpdateCheckSource === 'scheduled';
+    if (scheduled && !shouldRetryScheduled && scheduledAttemptFor) {
+      // electron-updater emits error and rejects the same operation. The event handler owns retry state.
+      return getUpdateStatus();
+    }
     updateCheckInFlight = false;
     installAfterDownload = false;
-    return setUpdateStatus({
+    lastUpdateCheckSource = null;
+    if (!shouldRetryScheduled) {
+      clearScheduledUpdateAttempt();
+    }
+    const status = setUpdateStatus({
       state: 'error',
       message: '업데이트 확인에 실패했습니다.',
       error: err?.message || String(err)
     });
+    if (shouldRetryScheduled) {
+      scheduleScheduledUpdateRetry();
+    }
+    return status;
   }
 }
 
@@ -2448,6 +2938,13 @@ function installDownloadedUpdate({ silent = true, forceRunAfter = true } = {}) {
     return checkForUpdates({ source: 'manual-install', installWhenDownloaded: true });
   }
 
+  if (unsavedChanges) {
+    return setUpdateStatus({
+      state: 'downloaded',
+      message: '저장하지 않은 설정이 있어 설치를 보류합니다.'
+    });
+  }
+
   setUpdateStatus({
     state: 'installing',
     message: '업데이트 설치를 시작합니다.',
@@ -2455,7 +2952,7 @@ function installDownloadedUpdate({ silent = true, forceRunAfter = true } = {}) {
   });
   bypassClosePrompt = true;
   unsavedChanges = false;
-  pauseExternalWatchdog(20 * 60 * 1000, 'auto-update');
+  pauseExternalWatchdog(20 * 60 * 1000, 'auto-update', true);
   setTimeout(() => {
     autoUpdater.quitAndInstall(silent, forceRunAfter);
   }, 300);
@@ -2465,10 +2962,6 @@ function installDownloadedUpdate({ silent = true, forceRunAfter = true } = {}) {
 function runScheduledUpdateCheck() {
   checkForUpdates({ source: 'scheduled', installWhenDownloaded: true })
     .then((status) => {
-      if (status?.state === 'error') {
-        scheduleScheduledUpdateRetry();
-        return;
-      }
       if (['disabled', 'skipped', 'unsupported', 'invalid-schedule'].includes(status?.state)) {
         scheduleMaintenanceUpdateCheck();
       }
@@ -2484,6 +2977,12 @@ function scheduleMaintenanceUpdateCheck() {
   initializeAutoUpdater();
 
   if (!maintenance.autoUpdateEnabled) {
+    if (lastUpdateCheckSource === 'scheduled') {
+      installAfterDownload = false;
+      lastUpdateCheckSource = null;
+      clearScheduledUpdateAttempt();
+      scheduledUpdateRetryIndex = 0;
+    }
     setUpdateStatus({
       state: 'disabled',
       message: '자동 업데이트가 꺼져 있습니다.',
@@ -2503,14 +3002,33 @@ function scheduleMaintenanceUpdateCheck() {
     return;
   }
 
-  const delay = getDelayUntilNextDailyTime(maintenance.updateTime);
-  const nextCheckAt = new Date(Date.now() + delay).toISOString();
+  const now = new Date();
+  const window = getScheduledUpdateWindow(now, maintenance);
+  if (!window.hasSafeWindow) {
+    setUpdateStatus({
+      state: 'invalid-schedule',
+      message: '자동 업데이트 시간과 종료 준비 시간 사이에 안전한 설치 시간이 없습니다.',
+      nextCheckAt: null,
+      error: 'No safe scheduled update window.'
+    });
+    return;
+  }
+  const completedScheduledFor = getUpdateScheduleState().lastCompletedScheduledFor;
+  const catchUpNeeded = window.isOpen
+    && completedScheduledFor !== window.scheduledFor.toISOString();
+  const nextRunAt = catchUpNeeded
+    ? new Date(Date.now() + 1000)
+    : getNextScheduledUpdate(now, maintenance);
+  const delay = Math.max(1000, nextRunAt.getTime() - Date.now());
+  const nextCheckAt = nextRunAt.toISOString();
   setUpdateStatus({
     nextCheckAt,
     state: getUpdateStatus().state === 'unsupported' ? 'unsupported' : getUpdateStatus().state,
     message: getUpdateStatus().state === 'unsupported'
       ? getUpdateStatus().message
-      : `다음 자동 업데이트 확인: ${maintenance.updateTime}`,
+      : (catchUpNeeded
+          ? '놓친 자동 업데이트 점검을 곧 실행합니다.'
+          : `다음 자동 업데이트 확인: ${maintenance.updateTime}`),
     error: getUpdateStatus().state === 'unsupported' ? getUpdateStatus().error : null
   });
   maintenanceUpdateTimer = setTimeout(runScheduledUpdateCheck, delay);
@@ -2776,42 +3294,34 @@ function getStartupFolderPath() {
   return path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
 }
 
-function getAutomaticInstallCutoff(nowInput = new Date(), maintenanceInput = getMaintenanceConfig()) {
-  const now = new Date(nowInput);
-  const maintenance = normalizeMaintenanceConfig(maintenanceInput);
-  const [hour, minute] = maintenance.unavailableStartTime.split(':').map(Number);
-  const cutoff = new Date(now);
-  cutoff.setHours(hour, minute - 15, 0, 0);
-  if (cutoff <= now && !isWithinUnavailableWindow(now, maintenance)) {
-    cutoff.setDate(cutoff.getDate() + 1);
-  }
-  return cutoff;
-}
-
 function scheduleScheduledUpdateRetry() {
   clearMaintenanceUpdateTimer();
   const maintenance = getMaintenanceConfig();
-  const delay = SCHEDULED_UPDATE_RETRY_DELAYS_MS[scheduledUpdateRetryIndex];
-  if (!delay || isWithinUnavailableWindow(new Date(), maintenance)) {
+  const deadlineAt = Number.isFinite(scheduledInstallDeadlineAt)
+    ? scheduledInstallDeadlineAt
+    : getScheduledUpdateWindow(new Date(), maintenance).installDeadline.getTime();
+  const decision = getScheduledRetryDecision(
+    new Date(),
+    deadlineAt,
+    scheduledUpdateRetryIndex,
+    SCHEDULED_UPDATE_RETRY_DELAYS_MS
+  );
+  if (!decision.shouldRetry || isWithinUnavailableWindow(new Date(), maintenance)) {
+    recordScheduledUpdateCompletion(decision.reason === 'deadline' ? 'retry-deadline' : 'retry-exhausted');
+    clearScheduledUpdateAttempt();
     scheduledUpdateRetryIndex = 0;
     scheduleMaintenanceUpdateCheck();
     return false;
   }
 
-  const retryAt = new Date(Date.now() + delay);
-  if (retryAt >= getAutomaticInstallCutoff(new Date(), maintenance)) {
-    scheduledUpdateRetryIndex = 0;
-    scheduleMaintenanceUpdateCheck();
-    return false;
-  }
-
+  const retryAt = decision.retryAt;
   scheduledUpdateRetryIndex += 1;
   setUpdateStatus({
     state: 'retry-wait',
     message: `자동 업데이트 재시도: ${retryAt.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`,
     nextCheckAt: retryAt.toISOString()
   });
-  maintenanceUpdateTimer = setTimeout(runScheduledUpdateCheck, delay);
+  maintenanceUpdateTimer = setTimeout(runScheduledUpdateCheck, decision.delayMs);
   maintenanceUpdateTimer.unref?.();
   return true;
 }
@@ -2838,6 +3348,7 @@ function ensureWatchdogTaskRegistration() {
   const watchdogScript = getWatchdogResourcePath('watchdog.ps1');
   if (!fs.existsSync(registrationScript)) {
     logSmss('[WATCHDOG]', { event: 'registration-script-missing', registrationScript });
+    scheduleWatchdogRegistrationRetry();
     return;
   }
 
@@ -2878,7 +3389,33 @@ function ensureWatchdogTaskRegistration() {
     if (watchdogRegistrationPending || enabled !== !!persistedConfig?.window?.autoStart) {
       watchdogRegistrationPending = false;
       ensureWatchdogTaskRegistration();
+    } else if (err) {
+      scheduleWatchdogRegistrationRetry();
+    } else {
+      clearTimeout(watchdogRegistrationRetryTimer);
+      watchdogRegistrationRetryTimer = null;
+      watchdogRegistrationRetryIndex = 0;
     }
+  });
+}
+
+function scheduleWatchdogRegistrationRetry() {
+  if (smokeTestMode || watchdogRegistrationRetryTimer || process.platform !== 'win32' || !app.isPackaged) {
+    return;
+  }
+  const delay = WATCHDOG_REGISTRATION_RETRY_DELAYS_MS[
+    Math.min(watchdogRegistrationRetryIndex, WATCHDOG_REGISTRATION_RETRY_DELAYS_MS.length - 1)
+  ];
+  watchdogRegistrationRetryIndex += 1;
+  watchdogRegistrationRetryTimer = setTimeout(() => {
+    watchdogRegistrationRetryTimer = null;
+    ensureWatchdogTaskRegistration();
+  }, delay);
+  watchdogRegistrationRetryTimer.unref?.();
+  logSmss('[WATCHDOG]', {
+    event: 'registration-retry-scheduled',
+    delayMs: delay,
+    attempt: watchdogRegistrationRetryIndex
   });
 }
 
@@ -2930,6 +3467,205 @@ async function openWindowsStartupSettings() {
   }
 }
 
+function canManagePresentationCursor(contents) {
+  return !!contents && !contents.isDestroyed() && typeof contents.insertCSS === 'function';
+}
+
+async function removePresentationCursorCss(contents, key) {
+  if (!key || !canManagePresentationCursor(contents) || typeof contents.removeInsertedCSS !== 'function') {
+    return;
+  }
+  try {
+    await contents.removeInsertedCSS(key);
+  } catch (_) {
+    // The page or webview may have navigated while the cursor style was being removed.
+  }
+}
+
+async function applyPresentationCursorCss(contents, generation = presentationCursorCssGeneration) {
+  if (!presentationMode || !presentationCursorHidden || !canManagePresentationCursor(contents)) {
+    return;
+  }
+
+  const contentsId = contents.id;
+  const previousKey = presentationCursorCssKeys.get(contentsId);
+  if (previousKey) {
+    presentationCursorCssKeys.delete(contentsId);
+    await removePresentationCursorCss(contents, previousKey);
+  }
+
+  try {
+    const key = await contents.insertCSS(PRESENTATION_CURSOR_HIDDEN_CSS);
+    if (
+      generation !== presentationCursorCssGeneration
+      || !presentationMode
+      || !presentationCursorHidden
+      || !canManagePresentationCursor(contents)
+    ) {
+      await removePresentationCursorCss(contents, key);
+      return;
+    }
+    presentationCursorCssKeys.set(contentsId, key);
+  } catch (err) {
+    if (smokeTestCursorAutoHideMode) {
+      logSmss('[CURSOR SMOKE]', {
+        event: 'insert-css-failed',
+        contentsId,
+        url: safeWebContentsUrl(contents),
+        error: err?.message || String(err)
+      });
+    }
+    // A later page-ready event will retry the cursor state.
+  }
+}
+
+function queuePresentationCursorCss(contents, generation = presentationCursorCssGeneration) {
+  if (!canManagePresentationCursor(contents)) {
+    return Promise.resolve();
+  }
+  const contentsId = contents.id;
+  const previousTask = presentationCursorCssTasks.get(contentsId) || Promise.resolve();
+  const task = previousTask
+    .catch(() => {})
+    .then(() => applyPresentationCursorCss(contents, generation));
+  presentationCursorCssTasks.set(contentsId, task);
+  task.finally(() => {
+    if (presentationCursorCssTasks.get(contentsId) === task) {
+      presentationCursorCssTasks.delete(contentsId);
+    }
+  });
+  return task;
+}
+
+function registerPresentationCursorContents(contents) {
+  if (!canManagePresentationCursor(contents) || presentationCursorContents.has(contents)) {
+    return;
+  }
+
+  presentationCursorContents.add(contents);
+  contents.once('destroyed', () => {
+    presentationCursorContents.delete(contents);
+    presentationCursorCssKeys.delete(contents.id);
+    presentationCursorCssTasks.delete(contents.id);
+  });
+  contents.on('dom-ready', () => {
+    if (presentationMode && presentationCursorHidden) {
+      queuePresentationCursorCss(contents);
+    }
+  });
+
+  if (presentationMode && presentationCursorHidden) {
+    queuePresentationCursorCss(contents);
+  }
+}
+
+function showPresentationCursor() {
+  presentationCursorHidden = false;
+  presentationCursorCssGeneration += 1;
+  const keys = Array.from(presentationCursorCssKeys.entries());
+  presentationCursorCssKeys.clear();
+  keys.forEach(([contentsId, key]) => {
+    const contents = Array.from(presentationCursorContents).find((item) => item.id === contentsId);
+    removePresentationCursorCss(contents, key);
+  });
+}
+
+function hidePresentationCursor() {
+  if (!presentationMode || presentationCursorHidden) {
+    return Promise.resolve();
+  }
+  presentationCursorHidden = true;
+  presentationCursorCssGeneration += 1;
+  const generation = presentationCursorCssGeneration;
+  return Promise.all(Array.from(presentationCursorContents, (contents) => (
+    queuePresentationCursorCss(contents, generation)
+  )));
+}
+
+function schedulePresentationCursorHide() {
+  clearTimeout(presentationCursorIdleTimer);
+  presentationCursorIdleTimer = null;
+  if (!presentationMode) {
+    return;
+  }
+  presentationCursorIdleTimer = setTimeout(hidePresentationCursor, PRESENTATION_CURSOR_IDLE_MS);
+  presentationCursorIdleTimer.unref?.();
+}
+
+function stopPresentationCursorAutoHide() {
+  clearTimeout(presentationCursorIdleTimer);
+  clearInterval(presentationCursorPollTimer);
+  presentationCursorIdleTimer = null;
+  presentationCursorPollTimer = null;
+  lastPresentationCursorPoint = null;
+  showPresentationCursor();
+}
+
+function syncPresentationCursorAutoHide() {
+  stopPresentationCursorAutoHide();
+  if (!presentationMode || !mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  registerPresentationCursorContents(mainWindow.webContents);
+  lastPresentationCursorPoint = screen.getCursorScreenPoint();
+  schedulePresentationCursorHide();
+  presentationCursorPollTimer = setInterval(() => {
+    if (!presentationMode || !mainWindow || mainWindow.isDestroyed()) {
+      stopPresentationCursorAutoHide();
+      return;
+    }
+    const point = screen.getCursorScreenPoint();
+    if (
+      lastPresentationCursorPoint
+      && point.x === lastPresentationCursorPoint.x
+      && point.y === lastPresentationCursorPoint.y
+    ) {
+      return;
+    }
+    lastPresentationCursorPoint = point;
+    showPresentationCursor();
+    schedulePresentationCursorHide();
+  }, PRESENTATION_CURSOR_POLL_MS);
+  presentationCursorPollTimer.unref?.();
+}
+
+async function runPresentationCursorAutoHideSmokeTest() {
+  const previousPresentationMode = presentationMode;
+  presentationMode = true;
+  clearTimeout(presentationCursorIdleTimer);
+  clearInterval(presentationCursorPollTimer);
+  presentationCursorIdleTimer = null;
+  presentationCursorPollTimer = null;
+  showPresentationCursor();
+  await hidePresentationCursor();
+
+  const managedContents = Array.from(presentationCursorContents).filter(canManagePresentationCursor);
+  const hiddenContents = managedContents.filter((contents) => presentationCursorCssKeys.has(contents.id));
+  const managedContentStates = managedContents.map((contents) => ({
+    id: contents.id,
+    url: safeWebContentsUrl(contents),
+    hidden: presentationCursorCssKeys.has(contents.id)
+  }));
+  const hiddenApplied = presentationCursorHidden
+    && managedContents.length >= 2
+    && hiddenContents.length === managedContents.length;
+
+  showPresentationCursor();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const cursorRestored = !presentationCursorHidden && presentationCursorCssKeys.size === 0;
+  presentationMode = previousPresentationMode;
+
+  return {
+    managedContents: managedContents.length,
+    hiddenContents: hiddenContents.length,
+    managedContentStates,
+    hiddenApplied,
+    cursorRestored,
+    passed: hiddenApplied && cursorRestored
+  };
+}
+
 function applyPresentationWindowMode() {
   if (!mainWindow) {
     return;
@@ -2942,6 +3678,7 @@ function applyPresentationWindowMode() {
     mainWindow.setAlwaysOnTop(!!persistedConfig?.window?.alwaysOnTop, 'screen-saver');
     mainWindow.webContents.send('window:fullscreenChanged', true);
     syncPowerSaveBlocker();
+    syncPresentationCursorAutoHide();
     return;
   }
 
@@ -2951,6 +3688,7 @@ function applyPresentationWindowMode() {
   mainWindow.center();
   mainWindow.webContents.send('window:fullscreenChanged', false);
   syncPowerSaveBlocker();
+  syncPresentationCursorAutoHide();
 }
 
 function createMainWindow() {
@@ -2972,6 +3710,7 @@ function createMainWindow() {
     icon: getAppIconPath(),
     webPreferences: mainWindowWebPreferences
   });
+  registerPresentationCursorContents(mainWindow.webContents);
 
   logBackgroundThrottling('main-window', mainWindowWebPreferences);
   attachSmssConsoleForwarding(mainWindow.webContents, 'main-renderer');
@@ -2993,6 +3732,7 @@ function createMainWindow() {
 
   mainWindow.webContents.on('did-attach-webview', (_event, webContents) => {
     webContents.setBackgroundThrottling(false);
+    registerPresentationCursorContents(webContents);
     attachPopupGuards(webContents);
     attachBrowserZoomControls(webContents);
     attachSmssViewDiagnostics(webContents);
@@ -3005,10 +3745,59 @@ function createMainWindow() {
       flushAutoStartWarning();
     }
     if (smokeTestMode) {
-      setTimeout(() => {
-        bypassClosePrompt = true;
-        app.quit();
-      }, smokeTestDurationMs);
+      mainWindow.webContents.executeJavaScript(`
+        (async () => {
+          await document.fonts.ready;
+          const loadedFaces = await document.fonts.load('16px "SUIT Variable"', '진접선 ABC 123');
+          const computedFontFamily = getComputedStyle(document.body).fontFamily;
+          return {
+            loadedFaceCount: loadedFaces.length,
+            computedFontFamily,
+            loaded: loadedFaces.length > 0,
+            applied: computedFontFamily.includes('SUIT Variable')
+          };
+        })()
+      `, true)
+        .then(async (result) => {
+          originalConsoleLog(`[FONT SMOKE] ${JSON.stringify(result)}`);
+          const cursorResult = smokeTestCursorAutoHideMode
+            ? await runPresentationCursorAutoHideSmokeTest()
+            : { passed: true, skipped: true };
+          if (smokeTestCursorAutoHideMode) {
+            originalConsoleLog(`[CURSOR SMOKE] ${JSON.stringify(cursorResult)}`);
+            logSmss('[CURSOR SMOKE]', cursorResult);
+            try {
+              fs.writeFileSync(
+                path.join(app.getPath('temp'), 'jinjeop-line-signage-cursor-smoke.json'),
+                JSON.stringify({ font: result, cursor: cursorResult }, null, 2),
+                'utf8'
+              );
+            } catch (_) {
+              // The exit code remains the authoritative smoke-test result.
+            }
+          }
+          if (!smokeTestAutoRefreshMode) {
+            await waitForDelay(smokeTestDurationMs);
+          }
+          const autoRefreshResult = await waitForSmokeAutoRefreshResult();
+          originalConsoleLog(`[AUTO REFRESH SMOKE RESULT] ${JSON.stringify(autoRefreshResult)}`);
+          bypassClosePrompt = true;
+          app.exit(
+            result.loaded
+              && result.applied
+              && cursorResult.passed
+              && autoRefreshResult?.completed === true
+              ? 0
+              : 1
+          );
+        })
+        .catch((err) => {
+          originalConsoleError(`[FONT SMOKE] ${err?.stack || err}`);
+          setTimeout(() => {
+            bypassClosePrompt = true;
+            app.exit(1);
+          }, smokeTestDurationMs);
+        });
     }
   });
 
@@ -3021,6 +3810,11 @@ function createMainWindow() {
       event: 'main-render-process-gone',
       details
     });
+    if (Date.now() < expectedRendererCrashUntil) {
+      expectedRendererCrashUntil = 0;
+      logSmss('[RUNTIME]', { event: 'expected-render-process-gone', details });
+      return;
+    }
     setTimeout(() => recoverMainRenderer(`gone-${details?.reason || 'unknown'}`), 250);
   });
 
@@ -3036,6 +3830,9 @@ function createMainWindow() {
 
   mainWindow.on('close', async (event) => {
     if (bypassClosePrompt || !unsavedChanges) {
+      if (!smokeTestMode && !watchdogPauseProtectedUntilExit) {
+        pauseExternalWatchdog(15 * 60 * 1000, 'intentional-quit', true);
+      }
       return;
     }
 
@@ -3056,6 +3853,7 @@ function createMainWindow() {
         syncAutoStartSetting({ notifyOnFailure: true });
         applyWindowOptions();
       } catch (err) {
+        cancelProtectedWatchdogPause();
         await dialog.showMessageBox(mainWindow, {
           type: 'error',
           message: '설정 저장에 실패했습니다.',
@@ -3063,19 +3861,28 @@ function createMainWindow() {
         });
         return;
       }
+      if (!watchdogPauseProtectedUntilExit) {
+        pauseExternalWatchdog(15 * 60 * 1000, 'intentional-quit', true);
+      }
       bypassClosePrompt = true;
       mainWindow.close();
       return;
     }
 
     if (result.response === 1) {
+      if (!watchdogPauseProtectedUntilExit) {
+        pauseExternalWatchdog(15 * 60 * 1000, 'intentional-quit', true);
+      }
       unsavedChanges = false;
       bypassClosePrompt = true;
       mainWindow.close();
+      return;
     }
+    cancelProtectedWatchdogPause();
   });
 
   mainWindow.on('closed', () => {
+    stopPresentationCursorAutoHide();
     mainWindow = null;
     popupWindows.forEach((w) => {
       if (!w.isDestroyed()) {
@@ -3150,11 +3957,16 @@ app.whenReady().then(() => {
   powerScheduleTimer.unref?.();
 
   powerMonitor.on('resume', () => {
+    rendererWatchdogSuppressedUntil = Date.now() + RENDERER_STARTUP_GRACE_MS;
+    writeRuntimeHeartbeat();
     scheduleMaintenanceUpdateCheck();
     syncPowerSaveBlocker();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('runtime:resume');
     }
+  });
+  powerMonitor.on('suspend', () => {
+    rendererWatchdogSuppressedUntil = Date.now() + RENDERER_STARTUP_GRACE_MS;
   });
 
   app.on('child-process-gone', (_event, details) => {
@@ -3196,7 +4008,11 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  stopPresentationCursorAutoHide();
   clearMaintenanceUpdateTimer();
+  clearConfigRecoveryTimer();
+  clearTimeout(watchdogRegistrationRetryTimer);
+  watchdogRegistrationRetryTimer = null;
   clearInterval(runtimeHeartbeatTimer);
   clearInterval(rendererHeartbeatWatchdogTimer);
   clearInterval(powerScheduleTimer);
@@ -3218,8 +4034,24 @@ ipcMain.handle('app:getVersion', () => app.getVersion());
 
 ipcMain.handle('app:getSmokeTestOptions', () => ({
   enabled: smokeTestMode,
-  autoRefresh: smokeTestAutoRefreshMode
+  autoRefresh: smokeTestAutoRefreshMode,
+  forceAutoRefreshFailure: smokeTestForceAutoRefreshFailureMode
 }));
+
+ipcMain.on('app:smokeAutoRefreshResult', (_event, result) => {
+  if (!smokeTestAutoRefreshMode || smokeAutoRefreshResult) {
+    return;
+  }
+  smokeAutoRefreshResult = {
+    completed: result?.completed === true,
+    noticeMode: result?.noticeMode || null,
+    time: result?.time || new Date().toISOString(),
+    error: result?.error || null
+  };
+  resolveSmokeAutoRefreshResult?.(smokeAutoRefreshResult);
+});
+
+app.on('will-quit', cleanupCurrentSmokeDataDirectory);
 
 ipcMain.handle('app:getAutoStartStatus', () => getAutoStartStatus());
 
@@ -3244,7 +4076,9 @@ ipcMain.handle('smss:getPostStatus', () => getSmssPostStatus());
 ipcMain.on('runtime:heartbeat', () => {
   lastRendererHeartbeatAt = Date.now();
   writeRuntimeHeartbeat();
-  clearExternalWatchdogPause();
+  if (shouldClearWatchdogPause({ protectedUntilExit: watchdogPauseProtectedUntilExit })) {
+    clearExternalWatchdogPause();
+  }
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -3346,6 +4180,7 @@ ipcMain.handle('window:toggleMaximize', () => {
   if (presentationMode) {
     presentationMode = false;
     mainWindow.webContents.send('window:fullscreenChanged', false);
+    syncPresentationCursorAutoHide();
   }
 
   if (mainWindow.isMaximized()) {
@@ -3382,7 +4217,7 @@ ipcMain.handle('window:isFullscreen', () => {
 });
 
 ipcMain.handle('app:requestQuit', () => {
-  pauseExternalWatchdog(15 * 60 * 1000, 'intentional-quit');
+  pauseExternalWatchdog(15 * 60 * 1000, 'intentional-quit', true);
   if (mainWindow) {
     mainWindow.close();
   }
