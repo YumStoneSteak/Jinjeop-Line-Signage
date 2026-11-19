@@ -15,7 +15,7 @@ const {
   getUnavailableWindowLabel
 } = window.dashboardMaintenanceUtils;
 const {
-  getDelayUntilNextLocalDay,
+  getNoticeRefreshDelay,
   getLocalDateKey,
   getNoticePublishState,
   normalizeNoticeSchedule,
@@ -422,9 +422,7 @@ function normalizeForSave(config) {
         path: item.path,
         type: item.type,
         duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
-        addedDate: schedule.addedDate,
-        publishStartDate: schedule.publishStartDate,
-        publishEndDate: schedule.publishEndDate
+        ...schedule
       };
     })
   };
@@ -1104,7 +1102,7 @@ function getPlayableCount(list = state.draftConfig.player.playlist) {
   return list.filter((item) => isPlaylistItemPlayable(item)).length;
 }
 
-function getPlaylistItemPublishState(item, today = getLocalDateKey()) {
+function getPlaylistItemPublishState(item, today = new Date()) {
   if (item?.missing) {
     return { playable: false, label: '⚠ 누락', className: 'warn' };
   }
@@ -1138,8 +1136,7 @@ function scheduleNoticePublishStateRefresh() {
   state.noticePublishTimer = setTimeout(() => {
     state.noticePublishTimer = null;
     refreshNoticePublishState();
-    scheduleNoticePublishStateRefresh();
-  }, getDelayUntilNextLocalDay());
+  }, getNoticeRefreshDelay(state.draftConfig.player.playlist));
 }
 
 function isPlaylistItemPlayable(item) {
@@ -4190,6 +4187,7 @@ async function addNoticeFiles() {
 }
 
 function renderPlaylist() {
+  scheduleNoticePublishStateRefresh();
   const list = state.draftConfig.player.playlist;
   els.playlistTBody.innerHTML = '';
 
@@ -4237,8 +4235,12 @@ function renderPlaylist() {
       <td class="playlist-filename" title="${escapeHtml(filename)}">${escapeHtml(filename)}</td>
       <td>${typeText}</td>
       <td><input class="duration-input" type="number" min="1" value="${Number(item.duration) || 5}" ${item.type === 'video' ? 'disabled' : ''} /></td>
-      <td><input class="publish-date-input publish-start-input" type="date" value="${normalizePublishDate(item.publishStartDate)}" aria-label="게시 시작일" /></td>
-      <td><input class="publish-date-input publish-end-input" type="date" value="${normalizePublishDate(item.publishEndDate)}" aria-label="게시 종료일" /></td>
+      <td><input class="publish-date-input publish-start-input" type="date" value="${normalizePublishDate(item.publishStartDate)}" aria-label="게시 시작일" />
+        <label><input class="use-Start" type="checkbox" ${item.publishStartTime ? 'checked' : ''} />시간</label>
+        <input class="time-Start" type="time" aria-label="게시 시작 시각" ${item.publishStartTime ? '' : 'hidden'} value="${item.publishStartTime || '00:00'}" /></td>
+      <td><input class="publish-date-input publish-end-input" type="date" value="${normalizePublishDate(item.publishEndDate)}" aria-label="게시 종료일" />
+        <label><input class="use-End" type="checkbox" ${item.publishEndTime ? 'checked' : ''} />시간</label>
+        <input class="time-End" type="time" aria-label="게시 종료 시각" ${item.publishEndTime ? '' : 'hidden'} value="${item.publishEndTime || '00:00'}" /></td>
       <td class="${publishState.className}">${publishState.label}</td>
       <td><button class="delete-btn" type="button" title="${escapeHtml(filename)} 삭제" aria-label="${escapeHtml(filename)} 삭제">🗑</button></td>
     `;
@@ -4257,8 +4259,13 @@ function renderPlaylist() {
       if (!target) {
         return;
       }
+      const startTime = tr.querySelector('.use-Start').checked ? tr.querySelector('.time-Start').value || '00:00' : '';
+      const endTime = tr.querySelector('.use-End').checked ? tr.querySelector('.time-End').value || '00:00' : '';
+      if (endTime && !publishEndInput.value) publishEndInput.value = publishStartInput.value || getLocalDateKey();
       const schedule = normalizeNoticeSchedule({
         ...target,
+        publishStartTime: startTime,
+        publishEndTime: endTime,
         publishStartDate: publishStartInput.value,
         publishEndDate: publishEndInput.value
       }, target.addedDate);
@@ -4267,6 +4274,9 @@ function renderPlaylist() {
       scheduleNoticePublishStateRefresh();
       syncDraftState();
     };
+    tr.querySelectorAll('input[type="checkbox"], input[type="time"]').forEach((input) => {
+      input.addEventListener('change', updatePublishDates);
+    });
     publishStartInput.addEventListener('change', updatePublishDates);
     publishEndInput.addEventListener('change', updatePublishDates);
 
