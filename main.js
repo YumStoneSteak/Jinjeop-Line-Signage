@@ -1772,9 +1772,7 @@ function normalizePlaylistItem(item) {
     path: pathValue,
     type: item.type === 'video' ? 'video' : 'image',
     duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
-    addedDate: schedule.addedDate,
-    publishStartDate: schedule.publishStartDate,
-    publishEndDate: schedule.publishEndDate
+    ...schedule
   };
 }
 
