@@ -38,6 +38,10 @@
     return text;
   }
 
+  function normalizeTime(value) {
+    return typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : '';
+  }
+
   function normalizeNoticeSchedule(item = {}, fallbackDate = getLocalDateKey()) {
     const validFallback = normalizePublishDate(fallbackDate) || getLocalDateKey();
     const explicitStartDate = normalizePublishDate(item.publishStartDate);
@@ -45,27 +49,43 @@
     return {
       addedDate,
       publishStartDate: explicitStartDate || addedDate,
-      publishEndDate: normalizePublishDate(item.publishEndDate)
+      publishEndDate: normalizePublishDate(item.publishEndDate),
+      publishStartTime: normalizeTime(item.publishStartTime),
+      publishEndTime: item.publishEndDate ? normalizeTime(item.publishEndTime) : ''
     };
   }
 
-  function getNoticePublishState(item = {}, todayInput = getLocalDateKey()) {
-    const today = normalizePublishDate(todayInput) || getLocalDateKey();
-    const schedule = normalizeNoticeSchedule(item, today);
-    if (schedule.publishStartDate && schedule.publishEndDate && schedule.publishStartDate > schedule.publishEndDate) {
-      return { playable: false, code: 'invalid-period', ...schedule };
+  function getBounds(schedule) {
+    const start = new Date(schedule.publishStartDate + 'T' + (schedule.publishStartTime || '00:00'));
+    let end = Infinity;
+    if (schedule.publishEndDate) {
+      const date = new Date(schedule.publishEndDate + 'T' + (schedule.publishEndTime || '00:00'));
+      if (!schedule.publishEndTime) date.setDate(date.getDate() + 1);
+      end = date.getTime();
     }
-    if (schedule.publishStartDate && today < schedule.publishStartDate) {
-      return { playable: false, code: 'scheduled', ...schedule };
+    return { start: start.getTime(), end };
+  }
+
+  function getNoticePublishState(item = {}, nowInput = new Date()) {
+    const now = normalizePublishDate(nowInput) ? new Date(nowInput + 'T00:00') : new Date(nowInput);
+    const schedule = normalizeNoticeSchedule(item, getLocalDateKey(now));
+    const { start, end } = getBounds(schedule);
+    let code = 'active';
+    if (end <= start) code = 'invalid-period';
+    else if (now < start) code = 'scheduled';
+    else if (now >= end) code = 'ended';
+    return { playable: code === 'active', code, ...schedule };
+  }
+
+  function getNoticeRefreshDelay(list, now = new Date()) {
+    let delay = getDelayUntilNextLocalDay(now);
+    for (const item of list) {
+      const { start, end } = getBounds(normalizeNoticeSchedule(item, getLocalDateKey(now)));
+      for (const boundary of [start, end]) {
+        if (boundary > now) delay = Math.min(delay, boundary - now);
+      }
     }
-    if (schedule.publishEndDate && today > schedule.publishEndDate) {
-      return { playable: false, code: 'ended', ...schedule };
-    }
-    return {
-      playable: true,
-      code: schedule.publishStartDate || schedule.publishEndDate ? 'active' : 'normal',
-      ...schedule
-    };
+    return delay;
   }
 
   function getDelayUntilNextLocalDay(dateInput = new Date()) {
@@ -79,6 +99,7 @@
   }
 
   return {
+    getNoticeRefreshDelay,
     getDelayUntilNextLocalDay,
     getLocalDateKey,
     getNoticePublishState,
