@@ -8,7 +8,10 @@ jobs:
   release:
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      TZ: Asia/Seoul
     steps:
+      - run: tzutil /s "Korea Standard Time"
       - uses: actions/checkout@v4
         with:
           ref: d9f4d00219b2fb52e297434f5f7bdc63d14d1fb8
