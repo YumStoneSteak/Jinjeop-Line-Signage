@@ -2103,10 +2103,7 @@ table {
   font-size: 13px;
 }
 
-#playlistTable {
-  table-layout: fixed;
-  min-width: 700px;
-}
+#playlistTable { table-layout: fixed; }
 
 .playlist-empty-cell {
   padding: 30px 16px;
@@ -2133,73 +2130,22 @@ table {
   font-weight: 900;
 }
 
-#playlistTable th,
-#playlistTable td {
-  vertical-align: middle;
-  min-width: 0;
-}
-
-#playlistTable th:nth-child(1),
-#playlistTable td:nth-child(1) {
-  width: 26px;
-}
-
-#playlistTable th:nth-child(3),
-#playlistTable td:nth-child(3) {
-  width: 52px;
-}
-
-#playlistTable th:nth-child(4),
-#playlistTable td:nth-child(4) {
-  width: 82px;
-}
-
-#playlistTable th:nth-child(5),
-#playlistTable td:nth-child(5),
-#playlistTable th:nth-child(6),
-#playlistTable td:nth-child(6) {
-  width: 150px;
-}
-
-#playlistTable th:nth-child(7),
-#playlistTable td:nth-child(7) {
-  width: 64px;
-}
-
-#playlistTable th:nth-child(8),
-#playlistTable td:nth-child(8) {
-  width: 44px;
-}
-
-.playlist-filename {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-#playlistTable th:nth-child(3),
-#playlistTable td:nth-child(3),
-#playlistTable th:nth-child(7),
-#playlistTable td:nth-child(7) {
-  min-width: 52px;
-  white-space: nowrap;
-}
-
-#playlistTable th:nth-child(4),
-#playlistTable td:nth-child(4) {
-  min-width: 82px;
-}
-
-.duration-input {
-  box-sizing: border-box;
-  width: 64px;
-  max-width: 100%;
-}
-
-.publish-date-input {
-  box-sizing: border-box;
-  min-width: 132px;
-}
+#playlistTable .playlist-row > td { padding: 0; border: 0; }
+.notice-card { padding: 16px; background: white; color: #263846; }
+.playlist-row + .playlist-row .notice-card { border-top: 1px solid var(--line); }
+.notice-header { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; align-items: center; gap: 12px; }
+.notice-name { display: grid; gap: 3px; overflow-wrap: anywhere; }
+.notice-name small { color: #64748b; }
+.notice-status { background: #eff5f6; padding: 4px 8px; border-radius: 6px; }
+.notice-controls, .fullscreen-options:not([hidden]) { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: end; }
+.notice-controls { margin: 14px 0; padding: 12px; background: #f4f7f9; border-radius: 8px; }
+.notice-controls label { display: grid; gap: 4px; }
+.notice-controls .notice-check { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; }
+.notice-controls input[type=number] { width: 90px; box-sizing: border-box; }
+.notice-dates { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,250px),1fr)); gap: 12px 20px; }
+.notice-dates strong { display: block; margin-bottom: 6px; }
+.notice-date-pair { display: flex; flex-wrap: wrap; gap: 6px; }
+.notice-date-pair input { flex: 1 1 100px; min-width: 0; max-width: 100%; box-sizing: border-box; }
 
 th,
 td {
@@ -2251,3 +2197,22 @@ td {
     margin-left: 0;
   }
 }
+
+.fullscreen-notice-media {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: contain;
+  background: black;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 2147483647;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  box-sizing: border-box;
+}
+.fullscreen-notice-media.visible { visibility: visible; }

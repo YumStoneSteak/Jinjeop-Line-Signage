@@ -44,21 +44,40 @@
     const addedDate = normalizePublishDate(item.addedDate) || explicitStartDate || validFallback;
     return {
       addedDate,
+      publishStartTime: normalizeTime(item.publishStartTime),
+      publishEndTime: normalizeTime(item.publishEndTime),
       publishStartDate: explicitStartDate || addedDate,
       publishEndDate: normalizePublishDate(item.publishEndDate)
     };
   }
 
-  function getNoticePublishState(item = {}, todayInput = getLocalDateKey()) {
-    const today = normalizePublishDate(todayInput) || getLocalDateKey();
+  function normalizeFullscreenOptions(item) {
+    const seconds = Number(item.repeatSeconds);
+    return {
+      fullscreenNotice: item.fullscreenNotice === true,
+      repeatSeconds: Number.isFinite(seconds) && seconds >= 1 ? Math.min(86400, Math.floor(seconds)) : 60,
+      playToEnd: item.playToEnd === true
+    };
+  }
+
+  function normalizeTime(value) {
+    return typeof value === 'string' && /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value) ? value : '';
+  }
+
+  function getNoticePublishState(item = {}, now = new Date()) {
+    const today = normalizePublishDate(now) || getLocalDateKey(now);
+    const time = now instanceof Date ? pad2(now.getHours()) + ':' + pad2(now.getMinutes()) : '00:00';
+    const current = today + 'T' + time;
     const schedule = normalizeNoticeSchedule(item, today);
-    if (schedule.publishStartDate && schedule.publishEndDate && schedule.publishStartDate > schedule.publishEndDate) {
+    const start = schedule.publishStartDate + 'T' + (schedule.publishStartTime || '00:00');
+    const end = schedule.publishEndDate + 'T' + (schedule.publishEndTime || '23:59');
+    if (schedule.publishEndDate && (schedule.publishEndTime ? start >= end : start > end)) {
       return { playable: false, code: 'invalid-period', ...schedule };
     }
-    if (schedule.publishStartDate && today < schedule.publishStartDate) {
+    if (schedule.publishStartDate && current < start) {
       return { playable: false, code: 'scheduled', ...schedule };
     }
-    if (schedule.publishEndDate && today > schedule.publishEndDate) {
+    if (schedule.publishEndDate && (schedule.publishEndTime ? current >= end : current > end)) {
       return { playable: false, code: 'ended', ...schedule };
     }
     return {
@@ -79,6 +98,7 @@
   }
 
   return {
+    normalizeFullscreenOptions,
     getDelayUntilNextLocalDay,
     getLocalDateKey,
     getNoticePublishState,

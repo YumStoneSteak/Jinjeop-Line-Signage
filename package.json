@@ -1,6 +1,6 @@
 {
   "name": "jinjeop-line-signage",
-  "version": "2.6.0",
+  "version": "2.6.2",
   "description": "진접선 행선안내 사이니지 Electron app",
   "main": "main.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "verify:update-schedule": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-update-schedule.js",
     "verify:watchdog": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-watchdog.js",
     "verify:reliability": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-reliability.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-durability.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-update-schedule.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-watchdog.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-recovery.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-runtime-recovery.js && node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-drag.js",
+    "verify:media-codecs": "electron scripts/check-media-codecs.js",
     "verify:smss-drag": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-smss-drag.js",
     "verify:package": "node --preserve-symlinks --preserve-symlinks-main scripts/verify-package.js",
     "build": "set ELECTRON_BUILDER_CACHE=.electron-builder-cache&& node --preserve-symlinks --preserve-symlinks-main node_modules/electron-builder/cli.js --win nsis && node --preserve-symlinks --preserve-symlinks-main scripts/fix-latest-yml.js && npm.cmd run verify:package",

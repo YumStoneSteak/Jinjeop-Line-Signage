@@ -99,6 +99,14 @@ try {
   assert.match(rendererSource, /function addNoticeFiles\(\)/);
   assert.match(rendererSource, /const existing = new Set\(state\.draftConfig\.player\.playlist\.map\(getNoticeIdentity\)\)/);
   assert.match(rendererSource, /toastMessage: '공지 설정이 저장되었습니다\.'/);
+  assert.doesNotMatch(rendererSource, /item\.type === 'video' \? 'disabled' : ''/);
+  assert.match(rendererSource, /videoAdvanceAllowedAt: 0/);
+  assert.match(rendererSource, /performance\.now\(\) < state\.videoAdvanceAllowedAt/);
+
+  const mediaMainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(mediaMainSource, /async function importNoticeMediaFileAsync\(sourcePath\)/);
+  assert.match(mediaMainSource, /await fs\.promises\.copyFile\(normalizedSource, targetPath\)/);
+  assert.match(mediaMainSource, /return importNoticeMediaFilesAsync\(result\.filePaths \|\| \[\]\)/);
 
   const rendererHtml = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
   const rendererStyles = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'styles.css'), 'utf8');

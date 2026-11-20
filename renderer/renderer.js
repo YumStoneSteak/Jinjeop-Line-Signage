@@ -15,9 +15,9 @@ const {
   getUnavailableWindowLabel
 } = window.dashboardMaintenanceUtils;
 const {
-  getDelayUntilNextLocalDay,
   getLocalDateKey,
   getNoticePublishState,
+  normalizeFullscreenOptions,
   normalizeNoticeSchedule,
   normalizePublishDate
 } = window.dashboardNoticeUtils;
@@ -100,6 +100,7 @@ const state = {
   isPaused: false,
   currentIndex: 0,
   slideTimer: null,
+  videoAdvanceAllowedAt: 0,
   noticePublishTimer: null,
   activeSlideKey: '',
   runtimeUnplayableSlides: new Set(),
@@ -422,9 +423,8 @@ function normalizeForSave(config) {
         path: item.path,
         type: item.type,
         duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
-        addedDate: schedule.addedDate,
-        publishStartDate: schedule.publishStartDate,
-        publishEndDate: schedule.publishEndDate
+        ...normalizeFullscreenOptions(item),
+        ...schedule
       };
     })
   };
@@ -1104,7 +1104,7 @@ function getPlayableCount(list = state.draftConfig.player.playlist) {
   return list.filter((item) => isPlaylistItemPlayable(item)).length;
 }
 
-function getPlaylistItemPublishState(item, today = getLocalDateKey()) {
+function getPlaylistItemPublishState(item, today = new Date()) {
   if (item?.missing) {
     return { playable: false, label: '⚠ 누락', className: 'warn' };
   }
@@ -1135,15 +1135,21 @@ function scheduleNoticePublishStateRefresh() {
   if (state.noticePublishTimer) {
     clearTimeout(state.noticePublishTimer);
   }
+  const now = new Date();
   state.noticePublishTimer = setTimeout(() => {
     state.noticePublishTimer = null;
-    refreshNoticePublishState();
+    const current = new Date();
+    if (state.draftConfig?.player?.playlist?.some(item =>
+      getNoticePublishState(item, now).code !== getNoticePublishState(item, current).code)) {
+      applyLayout();
+      refreshNoticePublishState();
+    }
     scheduleNoticePublishStateRefresh();
-  }, getDelayUntilNextLocalDay());
+  }, 60000 - now.getTime() % 60000);
 }
 
 function isPlaylistItemPlayable(item) {
-  return getPlaylistItemPublishState(item).playable && !state.runtimeUnplayableSlides.has(getSlideKey(item));
+  return !item.fullscreenNotice && getPlaylistItemPublishState(item).playable && !state.runtimeUnplayableSlides.has(getSlideKey(item));
 }
 
 function markSlideRuntimeUnplayable(item) {
@@ -1191,13 +1197,141 @@ function hideMediaElements() {
   els.slideVideo.pause();
   els.slideVideo.removeAttribute('src');
   els.slideVideo.load();
+  state.videoAdvanceAllowedAt = 0;
   state.activeSlideKey = '';
+}
+
+const fullscreenEntries = new Map();
+let fullscreenPlayback = null;
+let nextFullscreenAllowed = 0;
+const FULLSCREEN_VIDEO_FADE_MS = 600;
+
+function fadeOutFullscreenVideo(playback, remaining = FULLSCREEN_VIDEO_FADE_MS) {
+  if (playback !== fullscreenPlayback || playback.fadeTimer) return;
+  const duration = Math.max(1, Math.min(playback.fadeMs, remaining));
+  const media = playback.media;
+  const opacity = getComputedStyle(media).opacity;
+  playback.animation?.cancel();
+  playback.animation = media.animate([{ opacity }, { opacity: 0 }], {
+    duration, easing: 'ease-in-out', fill: 'forwards'
+  });
+  playback.fadeTimer = setTimeout(() => finishFullscreen(playback), duration);
+}
+
+function finishFullscreen(playback) {
+  if (playback !== fullscreenPlayback) return;
+  fullscreenPlayback = null;
+  clearTimeout(playback.fadeTimer);
+  playback.animation?.cancel();
+  const now = Date.now();
+  playback.entry.due = now + playback.entry.interval;
+  nextFullscreenAllowed = now + Math.min(5000, playback.entry.interval);
+  const media = playback.media;
+  media.onload = media.onplaying = media.onended = media.onerror = null;
+  media.remove();
+  if (media.tagName === 'VIDEO') {
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+  }
+  if (playback.visible && !state.isPaused) showSlide(state.currentIndex);
+}
+
+function startFullscreen(entry, item) {
+  const video = item.type === 'video';
+  const media = document.createElement(video ? 'video' : 'img');
+  const playback = { entry, media, visible: false, deadline: Date.now() + 15000, position: -1, progressAt: Date.now() };
+  fullscreenPlayback = playback;
+  const finish = () => finishFullscreen(playback);
+  function reveal() {
+    if (fullscreenPlayback !== playback || playback.visible) return;
+    playback.visible = true;
+    playback.progressAt = Date.now();
+    playback.deadline = video && item.playToEnd ? Infinity : Date.now() + Math.min(86400, Math.max(1, Number(item.duration) || 5)) * 1000;
+    clearSlideTimer();
+    els.slideVideo.pause();
+    media.showPopover?.();
+    media.classList.add('visible');
+    if (video) {
+      const naturalMs = Number.isFinite(media.duration) ? media.duration * 1000 : Infinity;
+      const displayMs = Math.min(naturalMs, playback.deadline - playback.progressAt);
+      playback.fadeMs = Math.max(1, Math.min(FULLSCREEN_VIDEO_FADE_MS, displayMs / 2));
+      playback.animation = media.animate([{ opacity: 0 }, { opacity: 1 }], {
+        duration: playback.fadeMs, easing: 'ease-in-out'
+      });
+    }
+  }
+  if (typeof media.showPopover === 'function') media.popover = 'manual';
+  media.className = 'fullscreen-notice-media';
+  media.onerror = finish;
+  media.onended = () => playback.visible ? fadeOutFullscreenVideo(playback) : finish();
+  if (video) {
+    media.muted = true;
+    media.playsInline = true;
+    media.onplaying = reveal;
+  } else media.onload = reveal;
+  document.body.appendChild(media);
+  media.src = pathToFileUrl(item.path);
+  if (video) media.play().catch(finish);
+}
+
+function updateFullscreenPlayback() {
+  const list = state.draftConfig?.player?.playlist;
+  if (!list) return;
+  const now = Date.now();
+  const seen = new Set();
+  const occurrences = new Map();
+  let candidate;
+  for (const item of list) {
+    if (!item.fullscreenNotice) continue;
+    const count = occurrences.get(item.path) || 0;
+    occurrences.set(item.path, count + 1);
+    const key = JSON.stringify([item.path, count, item.type, item.repeatSeconds, item.duration, item.playToEnd,
+      item.publishStartDate, item.publishStartTime, item.publishEndDate, item.publishEndTime]);
+    seen.add(key);
+    const status = getNoticePublishState(item, new Date(now)).code;
+    let entry = fullscreenEntries.get(key);
+    if (!entry) {
+      const interval = normalizeFullscreenOptions(item).repeatSeconds * 1000;
+      entry = { interval, due: now + interval };
+      fullscreenEntries.set(key, entry);
+    }
+    if (entry.status === 'scheduled' && status === 'active') entry.due = now;
+    entry.status = status;
+    entry.eligible = status === 'active' && !item.missing;
+    if (entry.eligible && entry.due <= now && (!candidate || entry.due < candidate.entry.due)) candidate = { entry, item };
+  }
+  for (const key of fullscreenEntries.keys()) {
+    if (!seen.has(key)) fullscreenEntries.delete(key);
+  }
+  const blocked = state.isPaused || isAnyPanelOpen();
+  const p = fullscreenPlayback;
+  if (p) {
+    const video = p.visible && p.media.tagName === 'VIDEO';
+    if (video && p.position !== p.media.currentTime) {
+      p.position = p.media.currentTime;
+      p.progressAt = now;
+    }
+    if (blocked || !p.entry.eligible || !Array.from(fullscreenEntries.values()).includes(p.entry)
+      || (video && now - p.progressAt > 15000)) {
+      finishFullscreen(p);
+    } else if (video) {
+      const mediaRemaining = Number.isFinite(p.media.duration)
+        ? (p.media.duration - p.media.currentTime) * 1000 : Infinity;
+      const remaining = Math.min(mediaRemaining, p.deadline - now);
+      if (remaining <= p.fadeMs) fadeOutFullscreenVideo(p, remaining > 0 ? remaining : p.fadeMs);
+    } else if (now >= p.deadline) {
+      finishFullscreen(p);
+    }
+  } else if (!blocked && candidate && now >= nextFullscreenAllowed) {
+    startFullscreen(candidate.entry, candidate.item);
+  }
 }
 
 function showEmptyState() {
   hideMediaElements();
   const list = state.draftConfig?.player?.playlist || [];
-  const hasConfiguredNotice = list.length > 0;
+  const hasConfiguredNotice = list.some(item => !item.fullscreenNotice);
   els.panelMedia?.classList.add('media-empty');
   els.emptyState.style.display = 'block';
   if (els.emptyStateTitle) {
@@ -1222,6 +1356,7 @@ function scheduleNext(ms) {
 
 function showSlide(index, options = {}) {
   applyLayout();
+  if (fullscreenPlayback?.visible) return;
   const { force = false } = options;
   const list = state.draftConfig.player.playlist;
   if (!list.length) {
@@ -1282,6 +1417,7 @@ function showSlide(index, options = {}) {
   els.slideVideo.src = pathToFileUrl(item.path);
   els.slideVideo.classList.add('active');
   state.activeSlideKey = slideKey;
+  state.videoAdvanceAllowedAt = performance.now() + (Math.max(1, Number(item.duration) || 30) * 1000);
   if (hasMultiplePlayableSlides) {
     applyTransitionClass(els.slideVideo);
   }
@@ -1290,7 +1426,7 @@ function showSlide(index, options = {}) {
     if (state.isPaused) {
       return;
     }
-    if (!hasMultiplePlayableSlides) {
+    if (!hasMultiplePlayableSlides || performance.now() < state.videoAdvanceAllowedAt) {
       els.slideVideo.currentTime = 0;
       els.slideVideo.play().catch(() => {});
       return;
@@ -4193,7 +4329,7 @@ function renderPlaylist() {
   const list = state.draftConfig.player.playlist;
   els.playlistTBody.innerHTML = '';
 
-  const playableCount = getPlayableCount(list);
+  const playableCount = list.filter(item => getPlaylistItemPublishState(item).playable && !state.runtimeUnplayableSlides.has(getSlideKey(item))).length;
   if (els.playlistSummary) {
     els.playlistSummary.textContent = `전체 ${list.length}개 · 현재 재생 ${playableCount}개`;
   }
@@ -4204,7 +4340,7 @@ function renderPlaylist() {
   if (!list.length) {
     const emptyRow = document.createElement('tr');
     emptyRow.innerHTML = `
-      <td class="playlist-empty-cell" colspan="8">
+      <td class="playlist-empty-cell" colspan="1">
         <div class="playlist-empty-content">
           <strong>등록된 공지가 없습니다.</strong>
           <span>이미지 또는 동영상 파일을 추가해 재생 목록을 시작하세요.</span>
@@ -4233,17 +4369,49 @@ function renderPlaylist() {
     const filename = getFilename(item.path);
 
     tr.innerHTML = `
-      <td class="drag-handle" title="${escapeHtml(filename)} 순서 변경" aria-label="${escapeHtml(filename)} 순서 변경">≡</td>
-      <td class="playlist-filename" title="${escapeHtml(filename)}">${escapeHtml(filename)}</td>
-      <td>${typeText}</td>
-      <td><input class="duration-input" type="number" min="1" value="${Number(item.duration) || 5}" ${item.type === 'video' ? 'disabled' : ''} /></td>
-      <td><input class="publish-date-input publish-start-input" type="date" value="${normalizePublishDate(item.publishStartDate)}" aria-label="게시 시작일" /></td>
-      <td><input class="publish-date-input publish-end-input" type="date" value="${normalizePublishDate(item.publishEndDate)}" aria-label="게시 종료일" /></td>
-      <td class="${publishState.className}">${publishState.label}</td>
-      <td><button class="delete-btn" type="button" title="${escapeHtml(filename)} 삭제" aria-label="${escapeHtml(filename)} 삭제">🗑</button></td>
+      <td><article class="notice-card">
+        <header class="notice-header">
+          <span class="drag-handle" title="순서 변경">☰</span>
+          <div class="notice-name"><small>${typeText}</small><strong>${escapeHtml(filename)}</strong></div>
+          <span class="notice-status ${publishState.className}">${publishState.label}</span>
+          <button class="delete-btn" type="button" aria-label="${escapeHtml(filename)} 삭제">삭제</button>
+        </header>
+        <div class="notice-controls">
+          <label>재생 시간(초)<input class="duration-input" type="number" min="1" max="86400" value="${Number(item.duration) || 5}"></label>
+          <label class="notice-check"><input class="fullscreen-toggle" type="checkbox" ${item.fullscreenNotice ? 'checked' : ''}>전체화면</label>
+          <div class="fullscreen-options" ${item.fullscreenNotice ? '' : 'hidden'}>
+            <label>재생 후 대기(초)<input class="repeat-seconds" type="number" min="1" max="86400" value="${normalizeFullscreenOptions(item).repeatSeconds}"></label>
+            ${item.type === 'video' ? '<label class="notice-check"><input class="play-to-end" type="checkbox" ' + (item.playToEnd ? 'checked' : '') + '>끝까지 재생</label>' : ''}
+          </div>
+        </div>
+        <div class="notice-dates">
+          ${['start','end'].map((side) => {
+            const start = side === 'start';
+            const label = start ? '게시 시작' : '게시 종료';
+            const schedule = normalizeNoticeSchedule(item);
+            return `<div><strong>${label}</strong><div class="notice-date-pair">
+              <input class="publish-${side}-input" type="date" value="${start ? schedule.publishStartDate : schedule.publishEndDate}" aria-label="${label} 날짜">
+              <input class="publish-${side}-time" type="time" value="${start ? schedule.publishStartTime : schedule.publishEndTime}" aria-label="${label} 시각"></div></div>`;
+          }).join('')}
+        </div>
+      </article></td>
     `;
 
     const durationInput = tr.querySelector('.duration-input');
+    durationInput.disabled = item.fullscreenNotice && item.type === 'video' && item.playToEnd;
+    const toggle = tr.querySelector('.fullscreen-toggle');
+    const interval = tr.querySelector('.repeat-seconds');
+    const toEnd = tr.querySelector('.play-to-end');
+    function updateFullscreenOptions() {
+      Object.assign(item, normalizeFullscreenOptions({
+        fullscreenNotice: toggle.checked, repeatSeconds: interval.value, playToEnd: toEnd?.checked
+      }));
+      renderPlaylist();
+      showSlide(state.currentIndex);
+      syncDraftState();
+    }
+    toggle.onchange = interval.onchange = updateFullscreenOptions;
+    if (toEnd) toEnd.onchange = updateFullscreenOptions;
     durationInput.addEventListener('change', () => {
       const value = Math.max(1, Number(durationInput.value) || 5);
       state.draftConfig.player.playlist[index].duration = value;
@@ -4259,7 +4427,9 @@ function renderPlaylist() {
       }
       const schedule = normalizeNoticeSchedule({
         ...target,
+        publishStartTime: tr.querySelector('.publish-start-time').value,
         publishStartDate: publishStartInput.value,
+        publishEndTime: tr.querySelector('.publish-end-time').value,
         publishEndDate: publishEndInput.value
       }, target.addedDate);
       Object.assign(target, schedule);
@@ -4267,7 +4437,9 @@ function renderPlaylist() {
       scheduleNoticePublishStateRefresh();
       syncDraftState();
     };
+    tr.querySelector('.publish-start-time').addEventListener('change', updatePublishDates);
     publishStartInput.addEventListener('change', updatePublishDates);
+    tr.querySelector('.publish-end-time').addEventListener('change', updatePublishDates);
     publishEndInput.addEventListener('change', updatePublishDates);
 
     tr.querySelector('.delete-btn').addEventListener('click', () => {
@@ -4353,7 +4525,7 @@ async function saveSettingsToDisk({ toastMessage = '' } = {}) {
     await refreshUpdateStatus();
     scheduleTrainInfoAutoRefresh();
     renderPlaylist();
-    showSlide(state.currentIndex);
+    showSlide(state.currentIndex, { force: true });
     updateBackgroundWidgetTasks();
     updateStationRequirementUi();
     if (toastMessage) {
@@ -6802,6 +6974,7 @@ async function init() {
   }
   if (typeof window.desktopAPI.onRuntimeResume === 'function') {
     window.desktopAPI.onRuntimeResume(() => {
+      updateFullscreenPlayback();
       refreshNoticePublishState();
       scheduleNoticePublishStateRefresh();
       scheduleTrainInfoAutoRefresh();
@@ -6849,6 +7022,7 @@ async function init() {
   state.currentIndex = 0;
   showSlide(0);
   scheduleNoticePublishStateRefresh();
+  window.setInterval(updateFullscreenPlayback, 250);
 
   if (typeof window.desktopAPI.sendRuntimeHeartbeat === 'function') {
     window.desktopAPI.sendRuntimeHeartbeat();

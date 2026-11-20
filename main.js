@@ -26,6 +26,7 @@ const {
   getUnavailableWindowLabel
 } = require('./maintenance-utils');
 const {
+  normalizeFullscreenOptions,
   normalizeNoticeSchedule,
   normalizePublishDate
 } = require('./notice-utils');
@@ -1291,6 +1292,71 @@ function importNoticeMediaFiles(filePaths) {
     .filter(Boolean);
 }
 
+async function importNoticeMediaFileAsync(sourcePath) {
+  const normalizedSource = typeof sourcePath === 'string' ? sourcePath.trim() : '';
+  if (!normalizedSource || !isNoticeMediaExtension(normalizedSource)) {
+    return null;
+  }
+
+  const noticeDir = getNoticeMediaDir();
+  try {
+    const sourceStat = await fs.promises.stat(normalizedSource);
+    if (!sourceStat.isFile()) {
+      return {
+        sourcePath: normalizedSource,
+        path: normalizedSource,
+        type: getNoticeMediaType(normalizedSource),
+        copied: false,
+        exists: false
+      };
+    }
+
+    await fs.promises.mkdir(noticeDir, { recursive: true });
+    if (isPathInside(noticeDir, normalizedSource)) {
+      return {
+        sourcePath: normalizedSource,
+        path: normalizedSource,
+        type: getNoticeMediaType(normalizedSource),
+        copied: false,
+        exists: true
+      };
+    }
+
+    const targetPath = getUniqueNoticeMediaPath(normalizedSource);
+    await fs.promises.copyFile(normalizedSource, targetPath);
+    return {
+      sourcePath: normalizedSource,
+      path: targetPath,
+      type: getNoticeMediaType(targetPath),
+      copied: true,
+      exists: true
+    };
+  } catch (err) {
+    safeConsoleError('Failed to preserve notice media file asynchronously:', err);
+    return {
+      sourcePath: normalizedSource,
+      path: normalizedSource,
+      type: getNoticeMediaType(normalizedSource),
+      copied: false,
+      exists: fs.existsSync(normalizedSource),
+      error: err.message || String(err)
+    };
+  }
+}
+
+async function importNoticeMediaFilesAsync(filePaths) {
+  const imported = [];
+  for (const filePath of Array.isArray(filePaths) ? filePaths : []) {
+    // Keep filename allocation sequential, while allowing the Electron main
+    // process to continue handling window input during large video copies.
+    const item = await importNoticeMediaFileAsync(filePath);
+    if (item) {
+      imported.push(item);
+    }
+  }
+  return imported;
+}
+
 function findPreservedNoticeMediaPath(filePath) {
   const originalPath = typeof filePath === 'string' ? filePath : '';
   if (!originalPath || fs.existsSync(originalPath)) {
@@ -1772,9 +1838,8 @@ function normalizePlaylistItem(item) {
     path: pathValue,
     type: item.type === 'video' ? 'video' : 'image',
     duration: Number(item.duration) > 0 ? Number(item.duration) : 5,
-    addedDate: schedule.addedDate,
-    publishStartDate: schedule.publishStartDate,
-    publishEndDate: schedule.publishEndDate
+    ...normalizeFullscreenOptions(item),
+    ...schedule
   };
 }
 
@@ -4243,7 +4308,7 @@ ipcMain.handle('dialog:pickMediaFiles', async () => {
   if (result.canceled) {
     return [];
   }
-  return importNoticeMediaFiles(result.filePaths || []);
+  return importNoticeMediaFilesAsync(result.filePaths || []);
 });
 
 ipcMain.handle('dialog:pickImageFile', async () => {
