@@ -1265,7 +1265,7 @@ function importNoticeMediaFile(sourcePath) {
     }
 
     const targetPath = getUniqueNoticeMediaPath(normalizedSource);
-    fs.copyFileSync(normalizedSource, targetPath);
+    fs.copyFileSync(normalizedSource, targetPath, fs.constants.COPYFILE_EXCL);
     return {
       sourcePath: normalizedSource,
       path: targetPath,
@@ -1322,8 +1322,16 @@ async function importNoticeMediaFileAsync(sourcePath) {
       };
     }
 
-    const targetPath = getUniqueNoticeMediaPath(normalizedSource);
-    await fs.promises.copyFile(normalizedSource, targetPath);
+    let targetPath;
+    for (;;) {
+      targetPath = getUniqueNoticeMediaPath(normalizedSource);
+      try {
+        await fs.promises.copyFile(normalizedSource, targetPath, fs.constants.COPYFILE_EXCL);
+        break;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+    }
     return {
       sourcePath: normalizedSource,
       path: targetPath,
