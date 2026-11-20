@@ -105,7 +105,7 @@ try {
 
   const mediaMainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(mediaMainSource, /async function importNoticeMediaFileAsync\(sourcePath\)/);
-  assert.match(mediaMainSource, /await fs\.promises\.copyFile\(normalizedSource, targetPath\)/);
+  assert.match(mediaMainSource, /await fs\.promises\.copyFile\(normalizedSource, targetPath, fs\.constants\.COPYFILE_EXCL\)/);
   assert.match(mediaMainSource, /return importNoticeMediaFilesAsync\(result\.filePaths \|\| \[\]\)/);
 
   const rendererHtml = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');

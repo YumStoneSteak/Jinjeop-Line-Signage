@@ -1192,6 +1192,8 @@ function applyTransitionClass(element) {
 }
 
 function hideMediaElements() {
+  els.slideImage.onload = els.slideImage.onerror = null;
+  els.slideVideo.onended = els.slideVideo.onerror = null;
   els.slideImage.classList.remove('active');
   els.slideVideo.classList.remove('active');
   els.slideVideo.pause();
@@ -1278,7 +1280,9 @@ function startFullscreen(entry, item) {
 function updateFullscreenPlayback() {
   const list = state.draftConfig?.player?.playlist;
   if (!list) return;
+  if (!fullscreenEntries.size && !fullscreenPlayback && !list.some(item => item.fullscreenNotice)) return;
   const now = Date.now();
+  const currentDate = new Date(now);
   const seen = new Set();
   const occurrences = new Map();
   let candidate;
@@ -1289,11 +1293,11 @@ function updateFullscreenPlayback() {
     const key = JSON.stringify([item.path, count, item.type, item.repeatSeconds, item.duration, item.playToEnd,
       item.publishStartDate, item.publishStartTime, item.publishEndDate, item.publishEndTime]);
     seen.add(key);
-    const status = getNoticePublishState(item, new Date(now)).code;
+    const status = getNoticePublishState(item, currentDate).code;
     let entry = fullscreenEntries.get(key);
     if (!entry) {
       const interval = normalizeFullscreenOptions(item).repeatSeconds * 1000;
-      entry = { interval, due: now + interval };
+      entry = { key, interval, due: now + interval };
       fullscreenEntries.set(key, entry);
     }
     if (entry.status === 'scheduled' && status === 'active') entry.due = now;
@@ -1312,7 +1316,7 @@ function updateFullscreenPlayback() {
       p.position = p.media.currentTime;
       p.progressAt = now;
     }
-    if (blocked || !p.entry.eligible || !Array.from(fullscreenEntries.values()).includes(p.entry)
+    if (blocked || !p.entry.eligible || fullscreenEntries.get(p.entry.key) !== p.entry
       || (video && now - p.progressAt > 15000)) {
       finishFullscreen(p);
     } else if (video) {
@@ -1385,9 +1389,7 @@ function showSlide(index, options = {}) {
       scheduleNext(durationMs);
     }
     if (item.type === 'video' && !state.isPaused && els.slideVideo.paused) {
-      els.slideVideo.play().catch(() => {
-        nextSlide();
-      });
+      resumeSlideVideo(item);
     }
     return;
   }
@@ -1428,7 +1430,7 @@ function showSlide(index, options = {}) {
     }
     if (!hasMultiplePlayableSlides || performance.now() < state.videoAdvanceAllowedAt) {
       els.slideVideo.currentTime = 0;
-      els.slideVideo.play().catch(() => {});
+      resumeSlideVideo(item);
       return;
     }
     nextSlide();
@@ -1436,7 +1438,13 @@ function showSlide(index, options = {}) {
 
   els.slideVideo.onerror = () => markSlideRuntimeUnplayable(item);
 
-  els.slideVideo.play().catch(() => {
+  resumeSlideVideo(item);
+}
+
+function resumeSlideVideo(item) {
+  const slideKey = getSlideKey(item);
+  els.slideVideo.play().catch((error) => {
+    if (error.name === 'AbortError' || state.activeSlideKey !== slideKey) return;
     markSlideRuntimeUnplayable(item);
   });
 }
@@ -1455,7 +1463,10 @@ function nextSlide() {
   showSlide(nextIndex, { force: true });
 }
 
+let mediaValidationGeneration = 0;
+
 async function refreshMissingFlags() {
+  const generation = ++mediaValidationGeneration;
   state.runtimeUnplayableSlides.clear();
   const list = state.draftConfig.player.playlist;
   if (!list.length) {
@@ -1467,13 +1478,15 @@ async function refreshMissingFlags() {
   }
 
   const validation = await window.desktopAPI.validateMediaPaths(list.map((item) => item.path));
+  if (generation !== mediaValidationGeneration || list !== state.draftConfig.player.playlist) return;
   const map = new Map(validation.map((v) => [v.path, v]));
 
-  state.draftConfig.player.playlist = list.map((item) => ({
-    ...item,
-    path: map.get(item.path)?.resolvedPath || item.path,
-    missing: !map.get(item.path)?.exists
-  }));
+  for (const item of list) {
+    const result = map.get(item.path);
+    if (!result) continue;
+    item.path = result.resolvedPath || item.path;
+    item.missing = !result.exists;
+  }
 
   applyLayout();
   renderPlaylist();

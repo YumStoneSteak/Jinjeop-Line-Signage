@@ -2137,6 +2137,9 @@ table {
 .notice-name { display: grid; gap: 3px; overflow-wrap: anywhere; }
 .notice-name small { color: #64748b; }
 .notice-status { background: #eff5f6; padding: 4px 8px; border-radius: 6px; }
+.notice-status:not(.muted):not(.warn) { background: #e1f4eb; color: #15583c; }
+.notice-status.warn { background: #fff0e7; color: #853b15; }
+.notice-card:focus-within { box-shadow: inset 3px 0 #137788; }
 .notice-controls, .fullscreen-options:not([hidden]) { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: end; }
 .notice-controls { margin: 14px 0; padding: 12px; background: #f4f7f9; border-radius: 8px; }
 .notice-controls label { display: grid; gap: 4px; }
